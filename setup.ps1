@@ -395,7 +395,6 @@ function Invoke-AwsOperation {
         Invoke-Terraform @('init')
         switch ($Operation) {
             'Start' {
-                Build-LocalImages
                 if ($status.Database -eq 'absent') {
                     Write-Host 'Create the database, password, and image repositories.'
                     Invoke-Terraform @(
@@ -404,25 +403,18 @@ function Invoke-AwsOperation {
                         '-target=aws_ecr_repository.backend', '-target=aws_ecr_repository.dashboard'
                     )
                     Write-Host 'Create the remaining infrastructure with ECS at zero tasks.'
+                    Build-LocalImages
+                    Push-Images
                     Invoke-Terraform @(
                         'apply', '-var-file=stopped.tfvars', '-var=rds_state=available',
                         '-var=import_existing=false'
                     )
                 } else {
                     Set-RdsAvailable $status
-                    Invoke-Terraform @(
-                        'apply', '-var-file=started.tfvars', '-var=import_existing=false',
-                        '-target=aws_ecr_repository.backend', '-target=aws_ecr_repository.dashboard'
-                    )
                 }
-                Push-Images
                 Write-Host 'Create the ALB and start both ECS services.'
-                # New revisions also replace tasks left running after a partial startup,
-                # so both services pull the latest images just pushed to ECR.
                 Invoke-Terraform @(
-                    'apply', '-var-file=started.tfvars', '-var=import_existing=false',
-                    '-replace=aws_ecs_task_definition.backend',
-                    '-replace=aws_ecs_task_definition.dashboard'
+                    'apply', '-var-file=started.tfvars', '-var=import_existing=false'
                 )
                 Wait-Services
                 Invoke-Terraform @('output', '-raw', 'alb_dns_name')
