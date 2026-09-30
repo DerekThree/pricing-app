@@ -1,7 +1,9 @@
 infra/.terraform/
-infra/.terraform.lock.hcl
 infra/terraform.tfstate
 
 docs/agents/issue-tracker.md
 docs/agents/triage-labels.md
 .scratch/
+
+pricing-backend/
+pricing-dashboard/
