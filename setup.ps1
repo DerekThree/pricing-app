@@ -275,24 +275,35 @@ function Invoke-Terraform {
 
 function Set-RdsAvailable {
     param([object]$Status)
-    if ($Status.Database -in @('absent', 'available')) { return }
-    if ($Status.Database -eq 'stopping') {
-        Invoke-Native aws @(
-            'rds', 'wait', 'db-instance-stopped', '--db-instance-identifier', $Database,
-            '--region', $AwsRegion
+    if ($Status.Database -eq 'absent') { return }
+    $deadline = [DateTime]::UtcNow.AddMinutes(30)
+    $startRequested = $false
+    do {
+        # Read fresh status even if the earlier menu/operation check said available.
+        $response = Get-AwsJson @(
+            'rds', 'describe-db-instances', '--db-instance-identifier', $Database
         )
-    }
-    if ($Status.Database -in @('stopped', 'stopping')) {
-        Write-Host 'Make RDS available before applying database or service changes.'
-        Invoke-Terraform @(
-            'apply', '-var-file=started.tfvars', '-var=import_existing=false',
-            '-target=aws_rds_instance_state.pricing'
-        )
-    }
-    Invoke-Native aws @(
-        'rds', 'wait', 'db-instance-available', '--db-instance-identifier', $Database,
-        '--region', $AwsRegion
-    )
+        $currentState = $response.DBInstances[0].DBInstanceStatus
+        if (-not $currentState) {
+            throw 'AWS returned no RDS status. Terraform apply will not continue.'
+        }
+        if ($currentState -eq 'available') {
+            Write-Host 'RDS is available. Continuing with Terraform.'
+            return
+        }
+        if ($currentState -eq 'stopped' -and -not $startRequested) {
+            Write-Host 'Starting RDS...'
+            Invoke-Native aws @(
+                'rds', 'start-db-instance', '--db-instance-identifier', $Database,
+                '--region', $AwsRegion, '--query', 'DBInstance.DBInstanceStatus',
+                '--output', 'text', '--no-cli-pager'
+            )
+            $startRequested = $true
+        }
+        Write-Host "Waiting for RDS to become available (current status: $currentState)..."
+        Start-Sleep -Seconds 15
+    } while ([DateTime]::UtcNow -lt $deadline)
+    throw 'RDS did not become available within 30 minutes. Terraform apply will not continue.'
 }
 
 function Push-Images {
@@ -427,8 +438,7 @@ function Invoke-AwsOperation {
                 Wait-Services -Stopped
                 Write-Host 'Stop RDS after ECS has drained.'
                 Invoke-Terraform @(
-                    'apply', '-var-file=stopped.tfvars', '-var=import_existing=false',
-                    '-target=aws_rds_instance_state.pricing'
+                    'apply', '-var-file=stopped.tfvars', '-var=import_existing=false'
                 )
             }
             'Destroy' {
@@ -502,11 +512,15 @@ function Show-Menu {
     }
     if ($status) {
         if ($status.Running) {
-            $reasons[3] = (@($reasons[3], 'Already running') | Where-Object { $_ }) -join '; '
+            $address = "http://$($status.LoadBalancers[0].DNSName)"
+            $reasons[3] = (@(
+                $reasons[3], "Already running at $address"
+            ) | Where-Object { $_ }) -join '; '
         }
         if (-not $status.NeedsStop) {
+            $stopReason = if ($status.Exists) { 'Already stopped' } else { 'Not installed' }
             $reasons[4] = (@(
-                $reasons[4], 'Already stopped or not installed'
+                $reasons[4], $stopReason
             ) | Where-Object { $_ }) -join '; '
         }
     }

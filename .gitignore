@@ -1,5 +1,7 @@
 infra/.terraform/
 infra/terraform.tfstate
+infra/terraform.tfstate.backup
+infra/terraform.tfstate.pre-move-backup
 
 docs/agents/issue-tracker.md
 docs/agents/triage-labels.md
