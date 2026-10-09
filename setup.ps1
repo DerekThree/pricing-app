@@ -59,6 +59,39 @@ function Connect-Aws {
     return $identity
 }
 
+function Ensure-StateBucket {
+    param([ValidateSet('Start', 'Stop', 'Destroy')][string]$Operation)
+    $bucket = 'pricing-app-tfstate'
+    try {
+        Invoke-Native aws @(
+            's3api', 'head-bucket', '--bucket', $bucket,
+            '--region', $AwsRegion, '--no-cli-pager'
+        ) -Capture | Out-Null
+        return
+    } catch {
+        $message = $_.Exception.Message
+        if ($message -notmatch '(?i)\b404\b|NoSuchBucket|Not Found') {
+            throw "Cannot access Terraform state bucket $($bucket): $message"
+        }
+    }
+
+    if ($Operation -ne 'Start') {
+        throw "Terraform state bucket $bucket is missing. Refusing to create it during $Operation."
+    }
+
+    # This bootstrap root uses the bucket as its own backend, so create the
+    # empty bucket first, then import it and apply the bootstrap security settings.
+    Write-Host "Creating missing Terraform state bucket $bucket..."
+    Invoke-Native aws @(
+        's3api', 'create-bucket', '--bucket', $bucket,
+        '--region', $AwsRegion, '--no-cli-pager'
+    )
+    $bootstrap = Join-Path $Infra 'bootstrap'
+    Invoke-Native terraform @("-chdir=$bootstrap", 'init', '-reconfigure')
+    Invoke-Native terraform @("-chdir=$bootstrap", 'import', 'aws_s3_bucket.tfstate', $bucket)
+    Invoke-Native terraform @("-chdir=$bootstrap", 'apply')
+}
+
 function Get-StateResources {
     $stateJson = Invoke-Native -Program 'terraform' -Arguments @("-chdir=$Infra", 'state', 'pull') -Capture
     if (-not $stateJson.Trim()) { return @() }
@@ -325,16 +358,19 @@ function Push-MissingImages {
 
     if (-not $missing.Count) { return }
     Build-LocalImages
+    $registry = $missing[0].Url.Split('/')[0]
+    $token = Invoke-Native aws @(
+        'ecr', 'get-login-password', '--region', $AwsRegion
+    ) -Capture
+    try {
+        $token | & docker login --username AWS --password-stdin $registry | Out-Host
+        if ($LASTEXITCODE -ne 0) { throw 'Docker ECR login failed.' }
+    } finally {
+        $token = $null
+    }
     foreach ($item in $missing) {
-        $registry = $item.Url.Split('/')[0]
-        $token = Invoke-Native aws @(
-            'ecr', 'get-login-password', '--region', $AwsRegion
-        ) -Capture
-        try {
-            $token | & docker login --username AWS --password-stdin $registry | Out-Host
-            if ($LASTEXITCODE -ne 0) { throw 'Docker ECR login failed.' }
-        } finally {
-            $token = $null
+        if ($item.Url.Split('/')[0] -ne $registry) {
+            throw 'Missing ECR images belong to different registries.'
         }
         $image = "$($item.Url):latest"
         Invoke-Native docker @('tag', "pricing-$($item.Name):latest", $image)
@@ -375,6 +411,8 @@ function Invoke-AwsOperation {
     param([ValidateSet('Start', 'Stop', 'Destroy')][string]$Operation)
     $script:MenuAwsCheckedAt = [DateTime]::MinValue
     $identity = Connect-Aws
+    Ensure-StateBucket -Operation $Operation
+    Invoke-Terraform @('init')
     $resources = @(Get-StateResources)
     Assert-StateAccount $resources $identity.Account
     $status = Get-AwsStatus
@@ -407,7 +445,6 @@ function Invoke-AwsOperation {
         } elseif ($Operation -eq 'Start' -and $status.Database -eq 'absent') {
             $env:TF_VAR_rds_password = New-Password
         }
-        Invoke-Terraform @('init')
         switch ($Operation) {
             'Start' {
                 if ($status.Database -eq 'absent') {
@@ -503,7 +540,14 @@ function Show-Menu {
             Write-Host 'Local Docker status unavailable.'
         }
     }
-    $resources = @(Get-StateResources)
+    $stateAvailable = $true
+    try {
+        $resources = @(Get-StateResources)
+    } catch {
+        $resources = @()
+        $stateAvailable = $false
+        Write-Host 'Terraform state unavailable; AWS setup will initialize it after login.'
+    }
     $status = $null
     if ($available['aws']) {
         if (([DateTime]::UtcNow - $script:MenuAwsCheckedAt).TotalSeconds -ge 60) {
@@ -532,7 +576,7 @@ function Show-Menu {
             ) | Where-Object { $_ }) -join '; '
         }
     }
-    if (-not $resources.Count) {
+    if ($stateAvailable -and -not $resources.Count) {
         $reasons[5] = (@(
             $reasons[5], 'No Terraform-managed infrastructure'
         ) | Where-Object { $_ }) -join '; '
