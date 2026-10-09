@@ -2,6 +2,15 @@
 # Use app.ps1 for ordered lifecycle operations; imports require explicit opt-in.
 terraform {
   required_version = ">= 1.7.0"
+
+  backend "s3" {
+    bucket = "pricing-app-tfstate"
+    key = "terraform.tfstate"
+    region = "us-east-1"
+    encrypt = true
+    use_lockfile = true
+  }
+
   required_providers {
     aws = { source = "hashicorp/aws", version = "~> 6.0" }
   }
@@ -206,11 +215,10 @@ resource "aws_db_instance" "pricing" {
   instance_class               = "db.t4g.micro"
   allocated_storage            = 20
   max_allocated_storage        = 1000
-  storage_type                 = "gp2"
+  storage_type                 = "gp3"
   storage_encrypted            = true
   port                         = 5432
   multi_az                     = false
-  availability_zone            = "us-east-1a"
   publicly_accessible          = false
   db_subnet_group_name         = aws_db_subnet_group.pricing.name
   vpc_security_group_ids       = [aws_security_group.database.id]
@@ -252,7 +260,7 @@ resource "aws_ecr_repository" "dashboard" {
 }
 resource "aws_cloudwatch_log_group" "pricing" {
   name              = "/ecs/pricing-app"
-  retention_in_days = 1
+  retention_in_days = 3
 }
 resource "aws_iam_role" "execution" {
   name = "ecsTaskExecutionRole"

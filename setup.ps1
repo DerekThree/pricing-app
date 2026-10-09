@@ -60,9 +60,9 @@ function Connect-Aws {
 }
 
 function Get-StateResources {
-    $path = Join-Path $Infra 'terraform.tfstate'
-    if (-not (Test-Path -LiteralPath $path)) { return @() }
-    $state = Get-Content -Raw -LiteralPath $path | ConvertFrom-Json
+    $stateJson = Invoke-Native -Program 'terraform' -Arguments @("-chdir=$Infra", 'state', 'pull') -Capture
+    if (-not $stateJson.Trim()) { return @() }
+    $state = $stateJson | ConvertFrom-Json
     return @($state.resources | Where-Object {
         $_.mode -eq 'managed' -and @($_.instances).Count -gt 0
     })
@@ -306,12 +306,27 @@ function Set-RdsAvailable {
     throw 'RDS did not become available within 30 minutes. Terraform apply will not continue.'
 }
 
-function Push-Images {
+function Push-MissingImages {
     $resources = @(Get-StateResources)
+    $missing = @()
     foreach ($name in @('backend', 'dashboard')) {
         $repository = Get-StateValue $resources 'aws_ecr_repository' $name
         if (-not $repository.repository_url) { throw "Missing ECR repository: $name." }
-        $registry = $repository.repository_url.Split('/')[0]
+        $images = Get-AwsJson @(
+            'ecr', 'list-images', '--repository-name', "pricing-$name",
+            '--filter', 'tagStatus=TAGGED'
+        )
+        if (@($images.imageIds | Where-Object { $_.imageTag -eq 'latest' }).Count -gt 0) {
+            Write-Host "ECR pricing-$($name):latest already exists; skipping push."
+        } else {
+            $missing += [pscustomobject]@{ Name = $name; Url = $repository.repository_url }
+        }
+    }
+
+    if (-not $missing.Count) { return }
+    Build-LocalImages
+    foreach ($item in $missing) {
+        $registry = $item.Url.Split('/')[0]
         $token = Invoke-Native aws @(
             'ecr', 'get-login-password', '--region', $AwsRegion
         ) -Capture
@@ -321,8 +336,8 @@ function Push-Images {
         } finally {
             $token = $null
         }
-        $image = "$($repository.repository_url):latest"
-        Invoke-Native docker @('tag', "pricing-$($name):latest", $image)
+        $image = "$($item.Url):latest"
+        Invoke-Native docker @('tag', "pricing-$($item.Name):latest", $image)
         Invoke-Native docker @('push', $image)
     }
 }
@@ -402,15 +417,16 @@ function Invoke-AwsOperation {
                         '-var=import_existing=false', '-target=aws_db_instance.pricing',
                         '-target=aws_ecr_repository.backend', '-target=aws_ecr_repository.dashboard'
                     )
+                } else {
+                    Set-RdsAvailable $status
+                }
+                Push-MissingImages
+                if ($status.Database -eq 'absent') {
                     Write-Host 'Create the remaining infrastructure with ECS at zero tasks.'
-                    Build-LocalImages
-                    Push-Images
                     Invoke-Terraform @(
                         'apply', '-var-file=stopped.tfvars', '-var=rds_state=available',
                         '-var=import_existing=false'
                     )
-                } else {
-                    Set-RdsAvailable $status
                 }
                 Write-Host 'Create the ALB and start both ECS services.'
                 Invoke-Terraform @(

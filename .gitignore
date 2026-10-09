@@ -9,3 +9,7 @@ docs/agents/triage-labels.md
 
 pricing-backend/
 pricing-dashboard/
+# Terraform generated files
+**/.terraform/
+**/*.tfstate
+**/*.tfstate.*
