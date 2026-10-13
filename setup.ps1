@@ -450,7 +450,7 @@ function Invoke-AwsOperation {
                 if ($status.Database -eq 'absent') {
                     Write-Host 'Create the database, password, and image repositories.'
                     Invoke-Terraform @(
-                        'apply', '-var-file=stopped.tfvars', '-var=rds_state=available',
+                        'apply', '-var=rds_state=available',
                         '-var=import_existing=false', '-target=aws_db_instance.pricing',
                         '-target=aws_ecr_repository.backend', '-target=aws_ecr_repository.dashboard'
                     )
@@ -458,14 +458,7 @@ function Invoke-AwsOperation {
                     Set-RdsAvailable $status
                 }
                 Push-MissingImages
-                if ($status.Database -eq 'absent') {
-                    Write-Host 'Create the remaining infrastructure with ECS at zero tasks.'
-                    Invoke-Terraform @(
-                        'apply', '-var-file=stopped.tfvars', '-var=rds_state=available',
-                        '-var=import_existing=false'
-                    )
-                }
-                Write-Host 'Create the ALB and start both ECS services.'
+                Write-Host 'Create the remaining infrastructure, ALB, and start both ECS services.'
                 Invoke-Terraform @(
                     'apply', '-var-file=started.tfvars', '-var=import_existing=false'
                 )
@@ -477,13 +470,13 @@ function Invoke-AwsOperation {
                 Set-RdsAvailable $status
                 Write-Host 'Stop ECS and remove the ALB.'
                 Invoke-Terraform @(
-                    'apply', '-var-file=stopped.tfvars', '-var=rds_state=available',
+                    'apply', '-var=rds_state=available',
                     '-var=import_existing=false'
                 )
                 Wait-Services -Stopped
                 Write-Host 'Stop RDS after ECS has drained.'
                 Invoke-Terraform @(
-                    'apply', '-var-file=stopped.tfvars', '-var=import_existing=false'
+                    'apply', '-var=import_existing=false'
                 )
             }
             'Destroy' {
