@@ -1,13 +1,13 @@
 # Pricing App: reconciled with read-only AWS inventory, 2026-09-29.
-# Use app.ps1 for ordered lifecycle operations; imports require explicit opt-in.
+# Use deploy/setup.ps1 for ordered lifecycle operations; imports require explicit opt-in.
 terraform {
   required_version = ">= 1.7.0"
 
   backend "s3" {
-    bucket = "pricing-app-tfstate"
-    key = "terraform.tfstate"
-    region = "us-east-1"
-    encrypt = true
+    bucket       = "pricing-app-tfstate"
+    key          = "terraform.tfstate"
+    region       = "us-east-1"
+    encrypt      = true
     use_lockfile = true
   }
 
@@ -27,7 +27,7 @@ variable "import_existing" {
   default     = false
 }
 variable "rds_password" {
-  description = "New database password. app.ps1 reuses its saved secret version on later runs."
+  description = "Database password supplied only during initial creation."
   type        = string
   sensitive   = true
   default     = null
@@ -36,6 +36,23 @@ variable "allowed_http_cidr" {
   description = "Existing ALB HTTP allowlist; do not widen without explicit authorization."
   type        = string
   default     = "130.105.47.225/32"
+}
+variable "account_password" {
+  description = "Account database password supplied only during initial creation."
+  type        = string
+  sensitive   = true
+  default     = null
+}
+variable "mock_server_desired_count" {
+  type    = number
+  default = 0
+  validation {
+    condition = (
+      var.mock_server_desired_count >= 0 &&
+      floor(var.mock_server_desired_count) == var.mock_server_desired_count
+    )
+    error_message = "mock_server_desired_count must be a nonnegative integer."
+  }
 }
 variable "backend_desired_count" {
   type    = number
@@ -177,11 +194,15 @@ resource "aws_security_group" "database" {
   description = "Security group for Pricing App PostgreSQL RDS"
   vpc_id      = aws_vpc.pricing.id
   ingress {
-    description     = "Allow PostgreSQL from Pricing App backend"
-    from_port       = 5432
-    to_port         = 5432
-    protocol        = "tcp"
-    security_groups = [aws_security_group.backend.id]
+    description = "Allow PostgreSQL from Pricing App services and database initialization"
+    from_port   = 5432
+    to_port     = 5432
+    protocol    = "tcp"
+    security_groups = [
+      aws_security_group.backend.id,
+      aws_security_group.mock_server.id,
+      aws_security_group.database_init.id
+    ]
   }
   egress {
     from_port   = 0
@@ -201,9 +222,12 @@ resource "aws_secretsmanager_secret" "rds_password" {
   recovery_window_in_days = 0
 }
 resource "aws_secretsmanager_secret_version" "rds_password" {
-  count         = nonsensitive(var.rds_password != null) ? 1 : 0
+  count         = 1
   secret_id     = aws_secretsmanager_secret.rds_password.id
   secret_string = jsonencode({ password = var.rds_password })
+  lifecycle {
+    ignore_changes = [secret_string]
+  }
 }
 resource "aws_db_instance" "pricing" {
   identifier                   = local.database_identifier
@@ -240,7 +264,7 @@ resource "aws_db_instance" "pricing" {
 }
 resource "aws_rds_instance_state" "pricing" {
   # Independent so a targeted start cannot modify a stopped database first.
-  # app.ps1 creates the database before applying this controller.
+  # deploy/setup.ps1 creates the database before applying this controller.
   identifier = local.database_identifier
   state      = var.rds_state
 }
@@ -284,9 +308,12 @@ resource "aws_iam_role_policy" "execution_secret" {
   policy = jsonencode({
     Version = "2012-10-17"
     Statement = [{
-      Effect   = "Allow"
-      Action   = "secretsmanager:GetSecretValue"
-      Resource = aws_secretsmanager_secret.rds_password.arn
+      Effect = "Allow"
+      Action = "secretsmanager:GetSecretValue"
+      Resource = [
+        aws_secretsmanager_secret.rds_password.arn,
+        aws_secretsmanager_secret.account_password.arn
+      ]
     }]
   })
 }
@@ -317,7 +344,7 @@ resource "aws_lb_target_group" "backend" {
   vpc_id      = aws_vpc.pricing.id
   health_check {
     enabled             = true
-    path                = "/api/v1/pricing-plans"
+    path                = "/actuator/health"
     protocol            = "HTTP"
     port                = "traffic-port"
     matcher             = "200"
@@ -364,7 +391,7 @@ resource "aws_lb_listener" "http" {
 resource "aws_lb_listener_rule" "api" {
   count        = var.alb_enabled ? 1 : 0
   listener_arn = aws_lb_listener.http[0].arn
-  priority     = 1
+  priority     = 2
   action {
     type             = "forward"
     target_group_arn = aws_lb_target_group.backend.arn
@@ -402,6 +429,13 @@ resource "aws_ecs_task_definition" "backend" {
       name      = "SPRING_DATASOURCE_PASSWORD"
       valueFrom = format("%s:password::", aws_secretsmanager_secret.rds_password.arn)
     }]
+    healthCheck = {
+      command     = ["CMD", "curl", "--fail", "--silent", "http://localhost:8080/actuator/health"]
+      interval    = 30
+      timeout     = 5
+      retries     = 3
+      startPeriod = 60
+    }
     logConfiguration = {
       logDriver     = "awslogs"
       secretOptions = []
@@ -523,4 +557,222 @@ resource "aws_ecs_service" "dashboard" {
 }
 output "alb_dns_name" {
   value = var.alb_enabled ? aws_lb.pricing[0].dns_name : null
+}
+
+resource "aws_security_group" "mock_server" {
+  name        = "pricing-app-mock-server-sg"
+  description = "Security group for Pricing App Mock Processor ECS tasks"
+  vpc_id      = aws_vpc.pricing.id
+  ingress {
+    from_port       = 8081
+    to_port         = 8081
+    protocol        = "tcp"
+    security_groups = [aws_security_group.alb.id]
+  }
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+}
+resource "aws_security_group" "database_init" {
+  name        = "pricing-app-database-init-sg"
+  description = "Security group for the database initialization task"
+  vpc_id      = aws_vpc.pricing.id
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+}
+resource "aws_secretsmanager_secret" "account_password" {
+  name                    = "pricing-app/account-password"
+  recovery_window_in_days = 0
+}
+resource "aws_secretsmanager_secret_version" "account_password" {
+  count         = 1
+  secret_id     = aws_secretsmanager_secret.account_password.id
+  secret_string = jsonencode({ password = var.account_password })
+  lifecycle {
+    ignore_changes = [secret_string]
+  }
+}
+resource "aws_ecr_repository" "mock_server" {
+  name                 = "pricing-mock-server"
+  image_tag_mutability = "MUTABLE"
+  force_delete         = true
+  image_scanning_configuration { scan_on_push = false }
+  encryption_configuration { encryption_type = "AES256" }
+}
+resource "aws_ecs_task_definition" "database_init" {
+  family                   = "pricing-database-init"
+  network_mode             = "awsvpc"
+  requires_compatibilities = ["FARGATE"]
+  cpu                      = "256"
+  memory                   = "512"
+  execution_role_arn       = aws_iam_role.execution.arn
+  container_definitions = jsonencode([{
+    name       = "DatabaseInit"
+    image      = "postgres:16"
+    essential  = true
+    entryPoint = ["/bin/bash", "-c"]
+    command    = [file("${path.module}/../local/init-db.sh")]
+    environment = [
+      { name = "PGHOST", value = aws_db_instance.pricing.address },
+      { name = "PGPORT", value = tostring(aws_db_instance.pricing.port) },
+      { name = "PGSSLMODE", value = "require" },
+      { name = "POSTGRES_USER", value = aws_db_instance.pricing.username },
+      { name = "POSTGRES_DB", value = aws_db_instance.pricing.db_name }
+    ]
+    secrets = [
+      {
+        name      = "PGPASSWORD"
+        valueFrom = format("%s:password::", aws_secretsmanager_secret.rds_password.arn)
+      },
+      {
+        name      = "ACCOUNT_PASSWORD"
+        valueFrom = format("%s:password::", aws_secretsmanager_secret.account_password.arn)
+      }
+    ]
+    logConfiguration = {
+      logDriver = "awslogs"
+      options = {
+        "awslogs-group"         = aws_cloudwatch_log_group.pricing.name
+        "awslogs-region"        = var.aws_region
+        "awslogs-stream-prefix" = "database-init"
+      }
+    }
+  }])
+  depends_on = [
+    aws_iam_role_policy.execution_secret,
+    aws_iam_role_policy_attachment.execution_base,
+    aws_secretsmanager_secret_version.account_password,
+    aws_route_table_association.public
+  ]
+}
+resource "aws_lb_target_group" "mock_server" {
+  name        = "pricing-mock-server-tg"
+  port        = 8081
+  protocol    = "HTTP"
+  target_type = "ip"
+  vpc_id      = aws_vpc.pricing.id
+  health_check {
+    enabled             = true
+    path                = "/actuator/health"
+    protocol            = "HTTP"
+    port                = "traffic-port"
+    matcher             = "200"
+    healthy_threshold   = 5
+    unhealthy_threshold = 2
+    interval            = 30
+    timeout             = 5
+  }
+}
+resource "aws_lb_listener_rule" "mock_server" {
+  count        = var.alb_enabled ? 1 : 0
+  listener_arn = aws_lb_listener.http[0].arn
+  priority     = 1
+  action {
+    type             = "forward"
+    target_group_arn = aws_lb_target_group.mock_server.arn
+  }
+  condition {
+    path_pattern { values = ["/api/v1/mock/*"] }
+  }
+  depends_on = [aws_lb_listener_rule.api]
+}
+resource "aws_ecs_task_definition" "mock_server" {
+  family                   = "pricing-mock-server"
+  network_mode             = "awsvpc"
+  requires_compatibilities = ["FARGATE"]
+  cpu                      = "512"
+  memory                   = "1024"
+  execution_role_arn       = aws_iam_role.execution.arn
+  container_definitions = jsonencode([{
+    name      = "Main"
+    image     = format("%s:latest", aws_ecr_repository.mock_server.repository_url)
+    essential = true
+    portMappings = [{
+      containerPort = 8081
+      hostPort      = 8081
+      protocol      = "tcp"
+      name          = "main-8081-tcp"
+    }]
+    environment = [
+      { name = "SPRING_DATASOURCE_USERNAME", value = "accountuser" },
+      {
+        name = "SPRING_DATASOURCE_URL"
+        value = format(
+          "jdbc:postgresql://%s:%s/accountdb",
+          aws_db_instance.pricing.address, aws_db_instance.pricing.port
+        )
+      }
+    ]
+    secrets = [{
+      name      = "SPRING_DATASOURCE_PASSWORD"
+      valueFrom = format("%s:password::", aws_secretsmanager_secret.account_password.arn)
+    }]
+    healthCheck = {
+      command     = ["CMD", "curl", "--fail", "--silent", "http://localhost:8081/actuator/health"]
+      interval    = 30
+      timeout     = 5
+      retries     = 3
+      startPeriod = 60
+    }
+    logConfiguration = {
+      logDriver     = "awslogs"
+      secretOptions = []
+      options = {
+        "awslogs-group"         = aws_cloudwatch_log_group.pricing.name
+        "awslogs-region"        = var.aws_region
+        "awslogs-stream-prefix" = "mock-server"
+        "awslogs-create-group"  = "true"
+      }
+    }
+  }])
+}
+resource "aws_ecs_service" "mock_server" {
+  name                               = "pricing-mock-server-service"
+  cluster                            = aws_ecs_cluster.pricing.id
+  task_definition                    = aws_ecs_task_definition.mock_server.arn
+  desired_count                      = var.mock_server_desired_count
+  launch_type                        = "FARGATE"
+  platform_version                   = "1.4.0"
+  health_check_grace_period_seconds  = 300
+  deployment_minimum_healthy_percent = 100
+  deployment_maximum_percent         = 200
+  enable_ecs_managed_tags            = true
+  enable_execute_command             = false
+  propagate_tags                     = "NONE"
+  deployment_circuit_breaker {
+    enable   = true
+    rollback = true
+  }
+  network_configuration {
+    subnets          = [aws_subnet.public["a"].id]
+    security_groups  = [aws_security_group.mock_server.id]
+    assign_public_ip = true
+  }
+  dynamic "load_balancer" {
+    for_each = var.alb_enabled ? [1] : []
+    content {
+      target_group_arn = aws_lb_target_group.mock_server.arn
+      container_name   = "Main"
+      container_port   = 8081
+    }
+  }
+  depends_on = [
+    aws_lb_listener_rule.mock_server,
+    aws_iam_role_policy.execution_secret,
+    aws_iam_role_policy_attachment.execution_base
+  ]
+}
+output "database_init" {
+  value = {
+    task_definition = aws_ecs_task_definition.database_init.arn
+    subnet          = aws_subnet.public["a"].id
+    security_group  = aws_security_group.database_init.id
+  }
 }

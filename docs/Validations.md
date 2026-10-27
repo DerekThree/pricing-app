@@ -64,3 +64,32 @@
 | A persisted Eligibility Reason condition uses an operator supported by its configured Attribute type during Pricing Batch evaluation | No | No | Yes | HTTP 200 Fee outcome `ERROR`; no error message | Partial â€” the operator is constrained, but the operator-and-type combination is not |
 | A Batch Account has an applicable Pricing Plan for its Product, Region, and Pricing Date | No | No | Yes | HTTP 200 account outcome `PLAN_NOT_FOUND`; no error message | No |
 | A present Batch transaction amount is non-null, non-negative, and uses increments of 0.01 | No | Yes | Yes | 400 — generated null/minimum validation or `Transaction Amount must use increments of 0.01` | No |
+
+## Mock Account Processor — Account Store
+
+The provider-owned Mock Account Processor contract is `pricing-mock-server/openapi.yaml`.
+The existing Pricing Backend validation rows above remain applicable to its synchronous endpoint.
+Submission validation uses the same contract schemas and `BatchValidator` rules; configuration
+type compatibility and required-attribute checks remain Pricing Engine evaluation concerns.
+
+Submission error messages include zero-based field paths, such as
+`accounts[1].fees[0].transactionAmount`. Custom validation also includes the Account Number and,
+where applicable, Fee Request ID and Fee code. Duplicate identities identify both record paths.
+Malformed values retain the parser's field path; syntax errors include line and column when
+available. Database constraint errors include PostgreSQL's table/column and key or failing-row
+details when supplied; these describe stored values rather than submitted array positions.
+The response remains `code` plus `message`. The table lists the reasons before variable context.
+
+| Validation | UI | API contract | Backend logic | Status and Error message | DB |
+| --- | --- | --- | --- | --- | --- |
+| Submission shapes and collection items must be valid and non-null | No | Yes | Yes — null collection items | 400 — `INVALID_BATCH`, field validation, `Request body is malformed`, or descriptive null-item message | No |
+| Required submission values and existing code formats/limits are preserved | No | Yes | No | 400 — `INVALID_BATCH`, descriptive validation message | Yes — required columns non-null; strings limited to 25 characters |
+| Accounts per Pricing Batch must not exceed `BATCH_MAX_ACCOUNTS` (default `100000`) | No | Yes — runtime limit documented | Yes — `BatchValidator`, before persistence | 400 — `INVALID_BATCH`, `Pricing Batch exceeds the limit of <limit> accounts (<count> submitted).` | No — rejection leaves no partial batch |
+| Account Numbers are unique within a Pricing Batch | No | No | Yes | 400 — `INVALID_BATCH`, `Account numbers must be unique within the Pricing Batch` | Yes — unique `(batch_id, account_number)` |
+| Previously accepted Batch IDs are rejected regardless of payload differences | No | Yes | Yes — insert-only persistence; centralized constraint handling | 409 — `BATCH_ALREADY_ACCEPTED`, `This Pricing Batch has already been accepted` with the Batch ID | Yes — `batch_outbox` primary key; rejected transactions leave all accepted rows unchanged |
+| Submitted Fee Request IDs are unique within an Account | No | No | Yes | 400 — `INVALID_BATCH`, `Fee Request IDs must be unique within an account` | Yes — unique `(account_id, fee_request_id)`; generated bigint `id` is the primary key |
+| Attribute values retain string, number, or boolean scalar type; repeated codes remain separate rows | No | Yes | No | 400 — `INVALID_BATCH` for malformed values; persisted scalar-check violations return `Account Attribute value must be a string, number, or boolean` | Yes — non-null JSONB scalar check; no uniqueness on attribute code |
+| A present transaction amount is non-null, nonnegative, and uses increments of 0.01; an absent amount is SQL null | No | Yes | Yes | 400 — `INVALID_BATCH`, generated null/minimum validation or `Transaction Amount must use increments of 0.01`; persisted monetary-check violations return `Transaction Amount must be nonnegative and use increments of 0.01` | Yes — nullable unrestricted `numeric` with nonnegative and increment checks |
+| Accounts reference a batch; attributes and Fee Requests reference an account | No | No | No | 400 — `INVALID_BATCH`, `The request violates a database constraint` | Yes — foreign keys |
+| Acceptance requires atomic commit of all accounts, attributes, Fee Requests, and the Batch Outbox | No | Yes | Yes | 202 after commit; 503 — `ACCOUNT_STORE_UNAVAILABLE` when the store is unavailable | Yes — one transaction; rollback leaves no partial batch |
+| Pricing Engine wake-ups advertise only committed work and carry no business payload or Batch ID | No | No | Yes — asynchronous post-commit empty HTTP POST; failed or rejected transactions do not notify | 202 remains accepted through delivery errors and bounded retry exhaustion | Accepted rows and `processed` remain unchanged; no delivery state is stored |

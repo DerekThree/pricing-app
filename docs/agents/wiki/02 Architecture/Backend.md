@@ -59,9 +59,9 @@ The current schema is defined by migrations. The root `DB Schema.txt` is histori
 
 The engine owns transport- and JPA-independent records:
 
-- [AccountBatch.java](../../../../pricing-backend/src/main/java/com/pricing/engine/AccountBatch.java) for input;
+- [RuleEngineBatch.java](../../../../pricing-backend/src/main/java/com/pricing/engine/RuleEngineBatch.java) for input;
 - [PriceConfig.java](../../../../pricing-backend/src/main/java/com/pricing/engine/PriceConfig.java) for immutable configuration;
-- [AccountBatchResult.java](../../../../pricing-backend/src/main/java/com/pricing/engine/AccountBatchResult.java) for statuses and Pricing Decisions;
+- [RuleEngineBatchResult.java](../../../../pricing-backend/src/main/java/com/pricing/engine/RuleEngineBatchResult.java) for statuses and Pricing Decisions;
 - [RuleEngine.java](../../../../pricing-backend/src/main/java/com/pricing/engine/RuleEngine.java) as the interface;
 - [PrototypeRuleEngine.java](../../../../pricing-backend/src/main/java/com/pricing/engine/PrototypeRuleEngine.java) as the implementation.
 

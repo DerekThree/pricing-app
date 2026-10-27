@@ -24,7 +24,7 @@ Dashboard -> Pricing Backend: Pricing Configuration APIs
 Dashboard -> Mock Account Processor: simulated Pricing Batch
 
 Mock Account Processor -> Account Store [PostgreSQL]: persist batch
-Mock Account Processor -> Account Outbox [PostgreSQL]: persist work-available outbox row atomically
+Mock Account Processor -> Batch Outbox [PostgreSQL]: persist work-available outbox row atomically
 Mock Account Processor -> Pricing Engine: HTTP work-available wake-up
 
 Pricing Engine -> Account Store [PostgreSQL]: query unprocessed batches
@@ -44,7 +44,7 @@ Mock Transaction Processor -> Dashboard: WebSocket Batch Result
 | Mock Account Processor | Simulates the external Account Processor, persists account batches, and notifies the Pricing Engine that work may be available. |
 | Mock Transaction Processor | Simulates the external Transaction Processor, reads persisted recommendations, processes them, and reports the simulated result to the Dashboard. |
 
-The two mocks may initially run as separate components in one `mock-processors` application. That
+The two mocks run as separate components in one Mock Server application. That
 application remains separate from both `pricing-backend` and the Pricing Engine. All applications may
 run on one development machine while remaining separate processes with separate network addresses.
 
@@ -98,10 +98,13 @@ The producing service owns the outbox associated with the work it persists.
 The outbox is **not an append-only event log**. There is exactly one outbox row for each batch.
 `batchId` is the primary key of the outbox row.
 
-The row is inserted once and its notification status is updated over time. A second outbox row for the
-same batch is never created.
+The Batch Outbox schema and delivery lifecycle are specified in the
+[Mock Account Processor design](mock-account-processor-design.md).
 
-Conceptually:
+The Recommendation Outbox row is inserted once and its notification status is updated over time.
+A second outbox row for the same batch is never created.
+
+For the Recommendation Outbox, conceptually:
 
 ```text
 batchId = B123 | status = PENDING
@@ -113,8 +116,9 @@ and after successful publication:
 batchId = B123 | status = SENT
 ```
 
-If a producer successfully sends the HTTP wake-up notification but crashes before updating the row
-from `PENDING` to `SENT`, restart recovery may send the same wake-up again. That duplicate wake-up is
+If the Pricing Engine successfully sends the HTTP wake-up notification but crashes before updating
+the Recommendation Outbox row from `PENDING` to `SENT`, restart recovery may send the same wake-up
+again. That duplicate wake-up is
 acceptable because the HTTP request contains no business work and the consumer simply re-checks the
 database.
 
@@ -152,9 +156,9 @@ Normal producer behavior:
 
 - persist the producer-owned business result and the one outbox row for the batch atomically;
 - after persistence succeeds, publish the HTTP wake-up notification;
-- update the outbox row status to indicate successful publication.
+- for the Recommendation Outbox, update the row status to indicate successful publication.
 
-Producer recovery behavior:
+Recommendation Outbox producer recovery behavior:
 
 - on startup or restart, scan the outbox for rows whose status still requires publication;
 - republish those wake-up notifications.
@@ -226,6 +230,17 @@ The Dashboard consumes three provider-owned contracts:
 The two Orval projects use separate output directories so their operations and model names cannot
 collide. Dashboard code explicitly imports the client belonging to the server it calls.
 
+For the HTTP submission stage, configuration and Simulator options remain with the Pricing Backend;
+Pricing Batch submissions go to the Mock Account Processor. Sending a request immediately changes
+Send to Reset. Display the response when received: an error restores Send except
+`BATCH_ALREADY_ACCEPTED`, which retains Reset and locking. `202 Accepted` displays the returned
+`batchId` and message, retains Reset, and keeps the Simulator locked until Reset. A
+failed submission allows retry with the same `batchId`; Reset starts a new batch identity.
+Completed pricing results and WebSocket delivery are outside this stage.
+
+The simulator's single Application Date is submitted once as batch-level `pricingDate` in both
+HTTP contracts. The Batch Outbox is the batch table and stores this date as `pricing_date`.
+
 The browser WebSocket connection wrapper remains handwritten using the native `WebSocket` API. It
 uses the generated message model, parses incoming data as unknown, and validates it against the
 versioned schema before displaying it.
@@ -233,8 +248,8 @@ versioned schema before displaying it.
 The Dashboard needs independent environment-specific addresses for:
 
 ```text
-PRICING_BACKEND_HTTP_URL
-ACCOUNT_PROCESSOR_HTTP_URL
+BACKEND_API_URL
+ACCOUNT_PROCESSOR_API_URL
 TRANSACTION_PROCESSOR_WEBSOCKET_URL
 ```
 
@@ -246,19 +261,21 @@ not the persisted batch contents.
 
 - The future Pricing Engine runs separately from `pricing-backend`.
 - Neither external-system mock belongs in `pricing-backend`.
-- Both mocks may initially share one separately deployable Mock Processors application.
+- Both mocks share one separately deployable Mock Server application.
 - The Pricing Engine does not run inside the Mock Processors application.
 - The Account Processor and Transaction Processor remain external-system boundaries from the pricing
   system's perspective.
 - Account batches are persisted in PostgreSQL before the Pricing Engine is notified.
+- Mock Account Processor submission, storage, and notification delivery follow the
+  [Mock Account Processor design](mock-account-processor-design.md).
 - Transaction recommendations are persisted in PostgreSQL before the Transaction Processor is notified.
 - Both work-available notification boundaries use HTTP.
 - HTTP notifications are generic wake-up signals and do not contain `batchId`.
 - PostgreSQL, not HTTP, is the durable source of pending work.
 - Producers use a transactional outbox so their persisted result and the corresponding notification
   intent are committed atomically within the producer-owned database.
-- The outbox contains exactly one row per batch; `batchId` is the outbox primary key and publication
-  state is updated on that row rather than represented by additional rows.
+- The outbox contains exactly one row per batch and uses `batchId` as its primary key. The
+  Recommendation Outbox records publication state on that row rather than adding more rows.
 - Pricing-batch idempotency is enforced by the one-row-per-batch outbox: `batchId` is its primary
   key, and recommendation persistence plus outbox insertion occur in one Recommendation Store transaction.
 - Account Store and Recommendation Store may be separated into different physical databases in the
@@ -278,10 +295,8 @@ not the persisted batch contents.
 
 ## Open decisions
 
-- Submission acknowledgement details between the Dashboard and Mock Account Processor.
-- Exact initial physical PostgreSQL database/schema topology. The Account Store and Recommendation
-  Store may share infrastructure initially but must remain separable into different databases.
-- Exact Account Store and Recommendation Store schemas beyond the decided one-outbox-row-per-batch
-  model and `batchId` outbox primary-key invariant.
+- Remaining PostgreSQL instance placement and topology outside the Account Store decisions in the
+  [Mock Account Processor design](mock-account-processor-design.md).
+- Recommendation Store schema details beyond its decided outbox invariants. The Account Store schema
+  is specified in the [Mock Account Processor design](mock-account-processor-design.md).
 - WebSocket message granularity, authentication, reconnection, and missed-message recovery.
-- Whether the two mocks ever need separate deployments.

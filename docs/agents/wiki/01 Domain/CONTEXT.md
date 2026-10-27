@@ -78,9 +78,9 @@ Use **Pricing Engine**, not “rule engine” or “fee calculator” in domain 
 
 ### Pricing Date
 
-The date on which Pricing Plan applicability is evaluated for one account in a Pricing Batch. It is distinct from the application current date used to determine Pricing Plan lifecycle mutability.
+The simulator's Application Date, used to evaluate every account in a Pricing Batch and determine Pricing Plan lifecycle mutability. There is one date for both purposes.
 
-Use **Pricing Date**, not “processing date” or “system date.”
+**Application Date** in the simulator and `pricingDate` in the API refer to this same date.
 
 ### Fee Request
 
@@ -94,6 +94,13 @@ The successful outcome of a Fee Request: either charged with a monetary amount o
 
 Use **Pricing Decision**, not “fee result” or “eligibility result.” A Fee Request can instead have a failure status and no Pricing Decision.
 
+## Simulation
+
+### Mock Account Processor
+
+The simulator's representation of the external Account Processor that supplies Pricing Batches
+to the Pricing Engine.
+
 ## Supporting records
 
 The code also uses these supporting concepts:
@@ -102,7 +109,7 @@ The code also uses these supporting concepts:
 - A **Region** owns selections of Branches, ZIP codes, and states used by Region resolution.
 - A **Product** has a Product Type (`DEPOSIT`, `CD`, or `CREDIT`).
 - A reusable **Fee** has a code, name, flat-or-percentage type, and Product Applicability. It has no amount until it becomes a Pricing Plan Fee.
-- The **application current date** is an in-memory clock used by Pricing Plan lifecycle rules and the simulator. It is not the Pricing Date definition.
+- The **application current date** is the same Application Date used by Pricing Plan lifecycle rules and the simulator.
 
 See [[01 Domain/Concept Relationships]] for the model as a graph.
 

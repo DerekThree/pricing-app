@@ -231,7 +231,7 @@ the Pricing Engine evaluates the Pricing Date and does not read the simulator cl
 The current Java seam is [RuleEngine.java](../pricing-backend/src/main/java/com/pricing/engine/RuleEngine.java):
 
 ```text
-AccountBatch -> RuleEngine.price(...) -> AccountBatchResult
+RuleEngineBatch -> RuleEngine.price(...) -> RuleEngineBatchResult
 ```
 
 The engine-owned records in `com.pricing.engine` do not depend on generated HTTP models or JPA

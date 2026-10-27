@@ -1,12 +1,13 @@
-# Run from the future main repository: .\app.ps1
+# Run from the main repository: .\deploy\setup.ps1
 # Terraform apply/destroy always show their plan and ask for confirmation.
 $ErrorActionPreference = 'Stop'
 # The Terraform subnet availability zones are also fixed to us-east-1.
 $AwsRegion = 'us-east-1'
-$Root = $PSScriptRoot
-$Infra = Join-Path $Root 'infra'
-$RepoNames = @('pricing-backend', 'pricing-dashboard')
-$ServiceNames = @('pricing-backend-service', 'pricing-dashboard-service')
+$Root = Split-Path -Parent $PSScriptRoot
+$Infra = Join-Path $PSScriptRoot 'aws'
+$Local = Join-Path $PSScriptRoot 'local'
+$RepoNames = @('pricing-backend', 'pricing-dashboard', 'pricing-mock-server')
+$ServiceNames = @($RepoNames | ForEach-Object { "$_-service" })
 $Cluster = 'pricing-app-cluster'
 $Database = 'pricing-app-db'
 $script:MenuAwsStatus = $null
@@ -157,7 +158,7 @@ function Get-AwsStatus {
         Database = $dbStatus
         Services = $services
         LoadBalancers = $loadBalancers
-        Running = ($dbStatus -eq 'available' -and $readyServices.Count -eq 2 -and
+        Running = ($dbStatus -eq 'available' -and $readyServices.Count -eq $ServiceNames.Count -and
             $loadBalancers.Count -eq 1 -and $loadBalancers[0].State.Code -eq 'active')
         NeedsStop = ($dbStatus -notin @('absent', 'stopped') -or
             $busyServices.Count -gt 0 -or $loadBalancers.Count -gt 0)
@@ -208,14 +209,10 @@ function Build-LocalImages {
     Invoke-Native docker @('info') -Capture | Out-Null
     Copy-Repositories
     foreach ($name in $RepoNames) {
-        try {
-            Invoke-Native docker @('image', 'inspect', "$($name):latest") -Capture | Out-Null
-        } catch {
-            Invoke-Native docker @(
-                'build', '--platform', 'linux/amd64', '-t', "$($name):latest",
-                (Join-Path $Root $name)
-            )
-        }
+        Invoke-Native docker @(
+            'build', '--platform', 'linux/amd64', '-t', "$($name):latest",
+            (Join-Path $Root $name)
+        )
     }
 }
 
@@ -225,7 +222,7 @@ function Open-Terminal {
     $code = "Set-Location -LiteralPath '$workingDirectory'; " +
         '$Host.UI.RawUI.WindowTitle = ' + "'$Title'; $Command"
     $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($code))
-    # These two visible terminals are the requested local app terminals.
+    # Keep the Compose logs visible in the local app terminal.
     Start-Process -FilePath 'powershell.exe' -WorkingDirectory $Root -ArgumentList @(
         '-NoProfile', '-NoExit', '-EncodedCommand', $encoded
     ) | Out-Null
@@ -233,10 +230,11 @@ function Open-Terminal {
 
 function Test-LocalRunning {
     $names = Invoke-Native docker @(
-        'container', 'ls', '--filter', 'status=running', '--format', '{{.Names}}'
+        'container', 'ls', '--filter', 'status=running',
+        '--filter', 'label=com.docker.compose.project=pricing-app', '--format', '{{.Names}}'
     ) -Capture
     $running = $names -split '\r?\n'
-    $missing = @('pricing-postgres', 'pricing-backend', 'pricing-dashboard') | Where-Object {
+    $missing = @('pricing-postgres') + $RepoNames | Where-Object {
         $_ -notin $running
     }
     return @($missing).Count -eq 0
@@ -249,13 +247,11 @@ function Start-Local {
     }
     Build-LocalImages
     Invoke-Native docker @('compose', 'version') -Capture | Out-Null
-    $backend = Join-Path $Root 'pricing-backend'
-    $envPath = Join-Path $backend '.env'
+    $envPath = Join-Path $Local '.env'
     if (-not (Test-Path -LiteralPath $envPath)) {
         $lines = @(
-            'POSTGRES_DB=pricingdb'
-            'POSTGRES_USER=pricinguser'
             "POSTGRES_PASSWORD=$(New-Password)"
+            "ACCOUNT_PASSWORD=$(New-Password)"
         )
         # CreateNew preserves an existing password even if another process creates the file.
         $stream = [IO.File]::Open($envPath, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write)
@@ -270,35 +266,36 @@ function Start-Local {
         Write-Host "Database credentials saved to $envPath"
     }
     $environment = Get-Content -LiteralPath $envPath
-    foreach ($key in @('POSTGRES_DB', 'POSTGRES_USER', 'POSTGRES_PASSWORD')) {
+    foreach ($key in @('POSTGRES_PASSWORD', 'ACCOUNT_PASSWORD')) {
         if (-not ($environment -match "^\s*$key\s*=\s*\S+")) {
             throw "$envPath must contain a nonempty $key."
         }
     }
-    $path = $backend.Replace("'", "''")
+    $containers = (Invoke-Native docker @(
+        'container', 'ls', '--all', '--format', '{{.Names}}'
+    ) -Capture) -split '\r?\n'
+    foreach ($name in (@('pricing-postgres') + $RepoNames)) {
+        if ($name -notin $containers) { continue }
+        $labels = Invoke-Native docker @(
+            'inspect', '--format', '{{json .Config.Labels}}', $name
+        ) -Capture | ConvertFrom-Json
+        if ($labels.'com.docker.compose.project' -ne 'pricing-app') {
+            Invoke-Native docker @('rm', '--force', $name)
+        }
+    }
+    $path = $Local.Replace("'", "''")
     $compose = "docker compose --project-directory '$path' --env-file '$path\.env' " +
         "-f '$path\compose.yaml' up --no-build"
-    Open-Terminal 'Pricing backend + PostgreSQL' $compose
-    $containers = Invoke-Native docker @(
-        'container', 'ls', '--all', '--filter', 'name=^/pricing-dashboard$', '--format', '{{.ID}}'
-    ) -Capture
-    if ($containers.Trim()) {
-        Open-Terminal 'Pricing dashboard' 'docker start --attach pricing-dashboard'
-    } else {
-        Open-Terminal 'Pricing dashboard' (
-            'docker run --name pricing-dashboard -p 5173:5173 ' +
-            '-e API_URL=http://localhost:8080 pricing-dashboard:latest'
-        )
-    }
+    Open-Terminal 'Pricing app' $compose
     Write-Host 'Waiting for the local Docker containers to start...'
-    $deadline = [DateTime]::UtcNow.AddSeconds(60)
+    $deadline = [DateTime]::UtcNow.AddMinutes(3)
     while (-not (Test-LocalRunning)) {
         if ([DateTime]::UtcNow -ge $deadline) {
-            throw 'Local containers did not all start. Check the backend and dashboard terminals.'
+            throw 'Local containers did not all start. Check the Pricing app terminal.'
         }
         Start-Sleep -Seconds 1
     }
-    Write-Host 'Dashboard: http://localhost:5173; backend: http://localhost:8080'
+    Write-Host 'Dashboard: http://localhost:5173; backend: 8080; Mock Processor: 8081'
 }
 
 function Invoke-Terraform {
@@ -339,26 +336,17 @@ function Set-RdsAvailable {
     throw 'RDS did not become available within 30 minutes. Terraform apply will not continue.'
 }
 
-function Push-MissingImages {
+function Push-Images {
     $resources = @(Get-StateResources)
-    $missing = @()
-    foreach ($name in @('backend', 'dashboard')) {
+    $images = @()
+    foreach ($name in @('backend', 'dashboard', 'mock_server')) {
         $repository = Get-StateValue $resources 'aws_ecr_repository' $name
         if (-not $repository.repository_url) { throw "Missing ECR repository: $name." }
-        $images = Get-AwsJson @(
-            'ecr', 'list-images', '--repository-name', "pricing-$name",
-            '--filter', 'tagStatus=TAGGED'
-        )
-        if (@($images.imageIds | Where-Object { $_.imageTag -eq 'latest' }).Count -gt 0) {
-            Write-Host "ECR pricing-$($name):latest already exists; skipping push."
-        } else {
-            $missing += [pscustomobject]@{ Name = $name; Url = $repository.repository_url }
-        }
+        $images += [pscustomobject]@{ Name = $repository.name; Url = $repository.repository_url }
     }
 
-    if (-not $missing.Count) { return }
     Build-LocalImages
-    $registry = $missing[0].Url.Split('/')[0]
+    $registry = $images[0].Url.Split('/')[0]
     $token = Invoke-Native aws @(
         'ecr', 'get-login-password', '--region', $AwsRegion
     ) -Capture
@@ -368,14 +356,42 @@ function Push-MissingImages {
     } finally {
         $token = $null
     }
-    foreach ($item in $missing) {
+    foreach ($item in $images) {
         if ($item.Url.Split('/')[0] -ne $registry) {
-            throw 'Missing ECR images belong to different registries.'
+            throw 'ECR images belong to different registries.'
         }
         $image = "$($item.Url):latest"
-        Invoke-Native docker @('tag', "pricing-$($item.Name):latest", $image)
+        Invoke-Native docker @('tag', "$($item.Name):latest", $image)
         Invoke-Native docker @('push', $image)
     }
+}
+
+function Initialize-AwsDatabase {
+    $configuration = Invoke-Native terraform @(
+        "-chdir=$Infra", 'output', '-json', 'database_init'
+    ) -Capture | ConvertFrom-Json
+    $network = 'awsvpcConfiguration={subnets=[' + $configuration.subnet +
+        '],securityGroups=[' + $configuration.security_group + '],assignPublicIp=ENABLED}'
+    $response = Get-AwsJson @(
+        'ecs', 'run-task', '--cluster', $Cluster, '--launch-type', 'FARGATE',
+        '--task-definition', $configuration.task_definition, '--network-configuration', $network
+    )
+    if (@($response.failures).Count -gt 0 -or -not $response.tasks[0].taskArn) {
+        throw "Database initialization could not start: $($response.failures.reason -join '; ')"
+    }
+    $taskArn = $response.tasks[0].taskArn
+    Invoke-Native aws @(
+        'ecs', 'wait', 'tasks-stopped', '--cluster', $Cluster, '--tasks', $taskArn,
+        '--region', $AwsRegion, '--no-cli-pager'
+    )
+    $result = Get-AwsJson @('ecs', 'describe-tasks', '--cluster', $Cluster, '--tasks', $taskArn)
+    $container = $result.tasks[0].containers | Where-Object { $_.name -eq 'DatabaseInit' }
+    if (@($result.failures).Count -gt 0 -or
+        $null -eq $container.exitCode -or $container.exitCode -ne 0) {
+        throw "Database initialization failed: $($result.tasks[0].stoppedReason). " +
+            "Exit code: $($container.exitCode). Check the database-init CloudWatch log."
+    }
+    Write-Host 'Account database initialized.'
 }
 
 function Wait-Services {
@@ -390,10 +406,10 @@ function Wait-Services {
             if (-not $busy.Count) { return }
         } elseif ($status.Running) {
             $resources = @(Get-StateResources)
-            foreach ($name in @('backend', 'dashboard')) {
+            foreach ($name in @('backend', 'dashboard', 'mock_server')) {
                 $expected = Get-StateValue $resources 'aws_ecs_service' $name
                 $actual = $status.Services | Where-Object {
-                    $_.serviceName -eq "pricing-$name-service"
+                    $_.serviceName -eq $expected.name
                 }
                 if ($actual.taskDefinition -ne $expected.task_definition) {
                     throw "The $name deployment rolled back or uses an unexpected task definition."
@@ -432,33 +448,37 @@ function Invoke-AwsOperation {
         return
     }
     $savedEnvironment = @{}
-    foreach ($key in @('TF_VAR_aws_region', 'TF_VAR_rds_password')) {
+    foreach ($key in @('TF_VAR_aws_region', 'TF_VAR_rds_password', 'TF_VAR_account_password')) {
         $savedEnvironment[$key] = [Environment]::GetEnvironmentVariable($key, 'Process')
     }
     try {
         $env:TF_VAR_aws_region = $AwsRegion
         $env:TF_VAR_rds_password = $null
-        $version = Get-StateValue $resources 'aws_secretsmanager_secret_version' 'rds_password'
-        if ($version) {
-            $env:TF_VAR_rds_password = ($version.secret_string | ConvertFrom-Json).password
-            if (-not $env:TF_VAR_rds_password) { throw 'Saved RDS password is missing.' }
-        } elseif ($Operation -eq 'Start' -and $status.Database -eq 'absent') {
+        $env:TF_VAR_account_password = $null
+        if ($Operation -eq 'Start' -and $status.Database -eq 'absent') {
             $env:TF_VAR_rds_password = New-Password
+        }
+        if ($Operation -ne 'Destroy' -and -not (
+            Get-StateValue $resources 'aws_secretsmanager_secret_version' 'account_password'
+        )) {
+            $env:TF_VAR_account_password = New-Password
         }
         switch ($Operation) {
             'Start' {
-                if ($status.Database -eq 'absent') {
-                    Write-Host 'Create the database, password, and image repositories.'
-                    Invoke-Terraform @(
-                        'apply', '-var=rds_state=available',
-                        '-var=import_existing=false', '-target=aws_db_instance.pricing',
-                        '-target=aws_ecr_repository.backend', '-target=aws_ecr_repository.dashboard'
-                    )
-                } else {
+                if ($status.Database -ne 'absent') {
                     Set-RdsAvailable $status
                 }
-                Push-MissingImages
-                Write-Host 'Create the remaining infrastructure, ALB, and start both ECS services.'
+                Write-Host 'Prepare RDS, image repositories, and the database initialization task.'
+                Invoke-Terraform @(
+                    'apply', '-var=rds_state=available', '-var=import_existing=false',
+                    '-target=aws_db_instance.pricing', '-target=aws_security_group.database',
+                    '-target=aws_ecr_repository.backend', '-target=aws_ecr_repository.dashboard',
+                    '-target=aws_ecr_repository.mock_server', '-target=aws_ecs_cluster.pricing',
+                    '-target=aws_ecs_task_definition.database_init'
+                )
+                Push-Images
+                Initialize-AwsDatabase
+                Write-Host 'Create the ALB and start all three ECS services.'
                 Invoke-Terraform @(
                     'apply', '-var-file=started.tfvars', '-var=import_existing=false'
                 )

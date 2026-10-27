@@ -138,6 +138,18 @@ notified that a recommendation batch is ready.
 Mock Account Processor and Mock Transaction processor will be located on Mock Server.
 A Spring Boot server dedicated to house these two services.
 
+The Mock Server uses the shared `/api/v1/mock/*` routing prefix:
+
+- `POST /api/v1/mock/acc/batch`: submit an account batch to the Mock Account Processor.
+- `POST /api/v1/mock/txn/wake`: planned wake-up endpoint for the Mock Transaction Processor.
+
+The Transaction Processor wake-up carries no `batchId`; it signals the processor to query
+PostgreSQL for pending recommendations. No Transaction Processor batch-submission endpoint is
+currently planned.
+
+When the Mock Server is exposed through the ALB, route `/api/v1/mock/*` to it before the
+existing `/api/*` backend rule. The synchronous backend keeps `/api/v1/batch`.
+
 In first iteration, the simulator sends an HTTP request directly to the pricing 
 engine located in Pricing API back end server and receives an HTTP response with
 transaction recommendations.
@@ -257,9 +269,13 @@ Persisted work-available notifications use an **outbox stored in the
 producer-owned PostgreSQL database**.
 
 The outbox is not an append-only event history. There is exactly **one outbox
-row per batch**, and `batchId` is the primary key of that row. The row is
-inserted once and its notification status is updated as publication progresses.
-No additional outbox row is created for the same batch.
+row per batch**, and `batchId` is the primary key of that row.
+
+The Batch Outbox schema and delivery lifecycle are specified in the
+[Mock Account Processor design](mock-account-processor-design.md).
+
+The Recommendation Outbox row is inserted once and its notification status is
+updated as publication progresses. No additional row is created for the same batch.
 
 The producer's durable business result and the corresponding outbox row are
 written atomically in the same local PostgreSQL transaction.
@@ -284,10 +300,13 @@ Normal operation:
     `batchId` atomically;
 -   after persistence succeeds, the service publishes the HTTP wake-up
     notification;
--   the service updates the existing outbox row's notification status rather
-    than inserting another row.
+-   for the Recommendation Outbox, the service updates the existing row's
+    notification status rather than inserting another row.
 
-Recovery behavior:
+Account Processor wake-up retries and startup recovery are specified in the
+[Mock Account Processor design](mock-account-processor-design.md).
+
+For the Pricing Engine's Recommendation Outbox, recovery behavior:
 
 -   when the service starts or restarts, it scans the outbox for rows whose
     status still requires publication;
@@ -296,8 +315,8 @@ Recovery behavior:
 -   continuous database polling solely for crash recovery is not part of the
     current design.
 
-A producer may successfully send a wake-up notification and then crash before
-updating the outbox status. On restart, the same notification can therefore be
+The Pricing Engine may successfully send a wake-up notification and then crash before
+updating its Recommendation Outbox status. On restart, the same notification can therefore be
 sent again. This is expected and harmless because the notification contains no
 business payload; it only tells the consumer to query PostgreSQL for pending
 work.

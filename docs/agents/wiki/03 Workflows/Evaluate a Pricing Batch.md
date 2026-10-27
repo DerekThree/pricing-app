@@ -20,12 +20,12 @@ sequenceDiagram
 
     UI->>API: POST /batch
     API->>API: contract and batch validation
-    API->>E: AccountBatch
+    API->>E: RuleEngineBatch
     E->>R: load(distinct Pricing Dates)
     R->>DB: phased REPEATABLE_READ queries
     DB-->>R: candidate Pricing Configuration
     R-->>E: immutable PriceConfig
-    E-->>API: AccountBatchResult
+    E-->>API: RuleEngineBatchResult
     API-->>UI: 200 BatchResult
 ```
 
@@ -119,4 +119,4 @@ Successful Fee Requests have status `OK` and exactly one Pricing Decision shape:
 - `CHARGED` with `amount` and no Eligibility Reasons;
 - `WAIVED` with satisfied Eligibility Reason codes and no amount.
 
-The enum definitions are in [AccountBatchResult.java](../../../../pricing-backend/src/main/java/com/pricing/engine/AccountBatchResult.java), and executable examples are in [PrototypeRuleEngineTests.java](../../../../pricing-backend/src/test/java/com/pricing/engine/PrototypeRuleEngineTests.java) and [BatchApiTests.java](../../../../pricing-backend/src/test/java/com/pricing/backend/batch/BatchApiTests.java).
+The enum definitions are in [RuleEngineBatchResult.java](../../../../pricing-backend/src/main/java/com/pricing/engine/RuleEngineBatchResult.java), and executable examples are in [PrototypeRuleEngineTests.java](../../../../pricing-backend/src/test/java/com/pricing/engine/PrototypeRuleEngineTests.java) and [BatchApiTests.java](../../../../pricing-backend/src/test/java/com/pricing/backend/batch/BatchApiTests.java).

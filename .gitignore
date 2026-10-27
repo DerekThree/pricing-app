@@ -1,7 +1,4 @@
-infra/.terraform/
-infra/terraform.tfstate
-infra/terraform.tfstate.backup
-infra/terraform.tfstate.pre-move-backup
+deploy/local/.env
 
 docs/agents/issue-tracker.md
 docs/agents/triage-labels.md
@@ -9,7 +6,11 @@ docs/agents/triage-labels.md
 
 pricing-backend/
 pricing-dashboard/
+pricing-mock-server/
+
 # Terraform generated files
 **/.terraform/
 **/*.tfstate
 **/*.tfstate.*
+
+.vscode/
