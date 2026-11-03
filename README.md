@@ -92,7 +92,8 @@ docker compose --env-file deploy/local/.env -f deploy/local/compose.yaml up --bu
 
 The Dashboard is at **http://localhost:5173**, Backend at **http://localhost:8080**, and
 Mock Processor at **http://localhost:8081**. PostgreSQL exposes port **5432**.
-The Dashboard retains its runtime `API_URL=http://localhost:8080` configuration.
+The Dashboard uses browser-visible runtime `BACKEND_API_URL=http://localhost:8080` and
+`ACCOUNT_PROCESSOR_API_URL=http://localhost:8081` settings.
 
 PostgreSQL creates `pricingdb`/`pricinguser`. `deploy/local/init-db.sh` creates
 `accountdb`/`accountuser` in the same container. Each application runs its own Flyway migrations.

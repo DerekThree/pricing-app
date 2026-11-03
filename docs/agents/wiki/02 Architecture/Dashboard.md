@@ -27,10 +27,13 @@ Each configuration type has a list route and a `:operation/:id?` CRUD route. The
 flowchart TB
     Route[React Router route] --> Loader[clientLoader]
     Route --> Action[clientAction]
-    Loader --> Client[generated API client]
+    Loader --> Client[generated Backend client]
     Action --> Client
-    Client --> Mutator[apiMutator]
+    Client --> Mutator[backendMutator]
     Mutator --> Backend[Spring Boot API]
+    Action --> ProcessorClient[generated Mock Account Processor client]
+    ProcessorClient --> ProcessorMutator[accountProcessorMutator]
+    ProcessorMutator --> Processor[Mock Account Processor API]
     Loader --> Page[React component state]
     Action --> Result[error or redirect and toast]
 ```
@@ -41,7 +44,12 @@ The generated client returns `{ data, status, headers }` for both successful and
 
 ## Generated client boundary
 
-[orval.config.ts](../../../../pricing-dashboard/orval.config.ts) generates `app/generated/api/client.ts` and `app/generated/api/models/` from the backend's `openapi.yaml`. Application code imports these functions and types. Treat `app/generated/api/` as derived output.
+[orval.config.ts](../../../../pricing-dashboard/orval.config.ts) generates separate clients and models
+from each provider-owned contract: `app/generated/backend/` for the Backend and
+`app/generated/accountProcessor/` for the Mock Account Processor. Both are derived output and are
+cleaned before generation. `BACKEND_API_URL` and `ACCOUNT_PROCESSOR_API_URL` independently select
+browser-visible provider addresses in native development and Docker runtime configuration.
+Unset production addresses retain AWS same-origin routing.
 
 ## Form conventions
 
@@ -70,11 +78,25 @@ The page mirrors lifecycle mutability in its disabled fields, while the backend 
 
 ## Simulator special case
 
-[simulator/index.tsx](../../../../pricing-dashboard/app/routes/simulator/index.tsx) maintains account and Fee Request drafts in local state. Product selection filters Account Attributes and Fees by Product Applicability. Every account and Fee Request receives a stable client-side correlation identifier. `Send` creates a new batch UUID and posts the whole Pricing Batch through a React Router fetcher without navigation.
+[simulator/index.tsx](../../../../pricing-dashboard/app/routes/simulator/index.tsx) maintains account
+and Fee Request drafts in local state. Product selection filters Account Attributes and Fees by
+Product Applicability. Every account and Fee Request receives a stable client-side identifier.
+`Send` assigns a batch UUID when needed and posts the Pricing Batch through the Mock Account Processor
+client and a React Router fetcher without navigation. Each account retains its `pricingDate`.
+Configuration, Simulator options, and Application Date operations continue using the Backend.
 
-While a request is pending or results are shown, the submitted draft is read-only. Results are correlated by Account Number and Fee Request ID rather than response order. `Reset` clears results while preserving the draft; an HTTP or network failure restores editability.
+`Send` immediately becomes `Reset`, disabled while submission is pending. HTTP 202 displays the
+accepted `batchId` and `message`; the Simulator remains locked until `Reset`, which clears the
+acknowledgement and current batch UUID while preserving the drafts. The next submission receives a
+new UUID. HTTP and transport failures, including timeouts, restore `Send` and editability; retries
+reuse the submitted batch UUID even after draft corrections. `BATCH_ALREADY_ACCEPTED` HTTP 409
+displays the provider's error and retains `Reset` and locking without creating an acknowledgement.
+No completed pricing results or WebSocket connection are used.
 
 ## Browser tests
 
-Playwright tests under [e2e](../../../../pricing-dashboard/e2e/) intercept backend requests. They verify form behavior, Product Applicability, Pricing Batch composition, correlation under reordered results, and error recovery without requiring the backend. Add coverage to the feature spec that owns the changed behavior.
+Playwright tests under [e2e](../../../../pricing-dashboard/e2e/) intercept provider requests. They
+verify form behavior, Product Applicability, Pricing Batch composition, independent provider
+addresses, acceptance, pending and accepted locking, Reset, and existing error recovery. Add
+coverage to the feature spec that owns the changed behavior.
 

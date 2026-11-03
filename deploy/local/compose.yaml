@@ -65,7 +65,8 @@ services:
     build: ../../pricing-dashboard
     container_name: pricing-dashboard
     environment:
-      API_URL: http://localhost:8080
+      BACKEND_API_URL: http://localhost:8080
+      ACCOUNT_PROCESSOR_API_URL: http://localhost:8081
     ports:
       - "5173:5173"
     depends_on:

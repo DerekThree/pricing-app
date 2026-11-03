@@ -347,15 +347,10 @@ function Push-Images {
 
     Build-LocalImages
     $registry = $images[0].Url.Split('/')[0]
-    $token = Invoke-Native aws @(
-        'ecr', 'get-login-password', '--region', $AwsRegion
-    ) -Capture
-    try {
-        $token | & docker login --username AWS --password-stdin $registry | Out-Host
-        if ($LASTEXITCODE -ne 0) { throw 'Docker ECR login failed.' }
-    } finally {
-        $token = $null
-    }
+    # Keep the password pipe inside cmd.exe: Windows PowerShell 5.1 can alter
+    # native-command stdin, while cmd.exe passes the AWS token through intact.
+    & cmd.exe /d /c "aws ecr get-login-password --region $AwsRegion | docker login --username AWS --password-stdin $registry" | Out-Host
+    if ($LASTEXITCODE -ne 0) { throw 'Docker ECR login failed.' }
     foreach ($item in $images) {
         if ($item.Url.Split('/')[0] -ne $registry) {
             throw 'ECR images belong to different registries.'

@@ -8,7 +8,9 @@ tags:
 
 # API contract
 
-[pricing-backend/openapi.yaml](../../../../pricing-backend/openapi.yaml) is the single HTTP contract shared by both repositories.
+Each provider owns its HTTP contract: [pricing-backend/openapi.yaml](../../../../pricing-backend/openapi.yaml)
+defines the Backend API; [pricing-mock-server/openapi.yaml](../../../../pricing-mock-server/openapi.yaml)
+defines the Mock Account Processor API.
 
 ```mermaid
 flowchart TB
@@ -16,6 +18,8 @@ flowchart TB
     Contract -->|Orval| TypeScript[TypeScript client and models]
     Java --> Controllers[Backend controllers]
     TypeScript --> Dashboard[Dashboard routes]
+    ProcessorContract[Mock Account Processor openapi.yaml] -->|Orval| ProcessorTypes[Processor client and models]
+    ProcessorTypes --> Dashboard
 ```
 
 ## Backend generation
@@ -24,7 +28,13 @@ The Maven build generates Spring interfaces in `com.pricing.backend.generated.ap
 
 ## Dashboard generation
 
-Orval reads the same file and generates fetch functions plus model files under `app/generated/api/`. The custom mutator preserves status, body, and headers rather than throwing for non-2xx responses.
+Orval generates separate clients and model namespaces under `app/generated/backend/` for the Backend
+and `app/generated/accountProcessor/` for the Mock Account Processor. API generation cleans both
+outputs first. The mutators preserve status, body, and headers rather than throwing for non-2xx
+responses. `backendMutator` and `accountProcessorMutator` share `app/utils/apiMutator.ts`.
+Configuration, Simulator options, and Application Date use the Backend client; Simulator
+batches use the processor client at `POST /api/v1/mock/acc/batch`, retaining account-level
+`pricingDate`. HTTP 202 returns `batchId` and `message`, rather than completed pricing results.
 
 ## Contract change surface
 

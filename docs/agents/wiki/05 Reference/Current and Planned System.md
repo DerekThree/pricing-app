@@ -14,7 +14,7 @@ The repository contains both implemented application code and future architectur
 |---|---|---|
 | Pricing Configuration | Implemented in the Spring Boot backend and PostgreSQL | Remains authoritative in the pricing backend |
 | Dashboard | Implemented React Router SPA | Major dashboard convenience expansion is not the current architectural priority |
-| Simulator | Implemented browser screen using backend date/options endpoints and synchronous `POST /batch` | Intended later to represent mocked upstream and downstream systems |
+| Simulator | Backend date/options; Mock Account Processor `POST /api/v1/mock/acc/batch` with HTTP 202 acceptance | Completed asynchronous pricing results remain future work |
 | Pricing Engine | `PrototypeRuleEngine` runs as a bean inside the backend | Separate Spring Boot worker processing persisted chunks |
 | Configuration loading | Candidate Pricing Plans filtered by submitted Pricing Dates in PostgreSQL; remaining evaluation in Java | Evaluation boundary accepted by ADR 0004 |
 | Pricing Batch storage | Not persisted by the current `/batch` path | Account Processor persists batches in PostgreSQL |
@@ -36,11 +36,11 @@ The repository contains both implemented application code and future architectur
 
 ```text
 Dashboard Simulator
-  -> synchronous POST /batch with complete Pricing Batch
-  -> BatchController
-  -> in-process Pricing Engine
-  -> Pricing Configuration reads from PostgreSQL
-  -> synchronous BatchResult response
+  -> Backend for configuration, Simulator options, and Application Date
+  -> Mock Account Processor POST /api/v1/mock/acc/batch with account-level pricingDate
+  -> durable batch acceptance
+  -> HTTP 202 batchId and message
+  -> locked Simulator until Reset
 ```
 
 ## Planned request path
