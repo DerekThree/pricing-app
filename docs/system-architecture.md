@@ -161,6 +161,42 @@ transaction recommendations.
 The Pricing Engine runs as its own Spring Boot server and processes batches
 asynchronously.
 
+The asynchronous Pricing Engine preserves the existing pricing evaluation rules.
+
+The first asynchronous version runs a single Pricing Engine instance and processes
+Pricing Batches one at a time, in series. Independent Pricing Batches may complete
+out of submission order.
+
+After processing the batches returned by an outbox scan, the engine scans the
+outbox again for any new unprocessed batches that arrived during processing.
+If it finds more batches, it processes them in series and checks again after
+finishing them.
+
+Pricing Configuration is captured when evaluation starts, rather than when the
+Account Processor accepts the batch. Temporary infrastructure failures receive
+bounded automatic retries with delay. After retries are exhausted, the batch
+remains unprocessed.
+
+The engine waits and retries the same batch. It does not start another Pricing
+Batch to fill that batch's retry delay.
+
+If calculation has completed but storing its results fails, the engine retains
+the already-calculated results. When database connectivity returns, it retries
+storing those same results. It does not discard them or recalculate the batch.
+
+If retries are exhausted because a required database is unavailable, the engine
+stops batch processing until database connectivity is restored. It does not
+attempt the remaining batches against the unavailable database; they remain
+unprocessed.
+
+After database retries are exhausted, the engine periodically checks database
+connectivity while the database is unavailable. During this time, it does not
+start new batch processing and ignores incoming wake-up calls without storing,
+queuing, or remembering them. When connectivity is restored, the engine first
+stores any already-calculated results awaiting persistence, then performs a
+one-time outbox scan for all unprocessed Pricing Batches and processes them one
+at a time, in series.
+
 The Account Processor persists an account batch in PostgreSQL, then sends an HTTP
 notification to the Pricing Engine indicating that new account work may be available.
 The HTTP notification is a wake-up signal; PostgreSQL is the durable source of pending

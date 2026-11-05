@@ -34,14 +34,14 @@ boundaries remain defined in [Validations](Validations.md).
   code `BATCH_ALREADY_ACCEPTED`, and a descriptive message including the Batch ID. Preserve the
   accepted outbox (including `processed`), accounts, attributes, and Fee Requests unchanged.
 - Enforce batch identity with the outbox primary key so concurrent submissions cannot both commit.
-- Submit the simulator's Application Date once as batch-level `pricingDate`, shared by all accounts.
+- Preserve `pricingDate` on each submitted account. There is no batch-level date field.
 
 ## Account Store
 
 | Table | Contents |
 | --- | --- |
-| Outbox | The batch table: one row per batch with `batchId`, Application Date, and `processed`, initially `false`. |
-| Accounts | One row per submitted account, associated with its batch. |
+| Outbox | The batch table: one row per batch with `batchId` and `processed`, initially `false`; no date. |
+| Accounts | One row per submitted account, including its Pricing Date, associated with its batch. |
 | Account attributes | One row per submitted attribute, associated with its account. |
 | Fee requests | One row per submitted Fee Request, associated with its account. |
 
@@ -63,8 +63,8 @@ consumer or retries. A `2xx` response completes delivery; other statuses, connec
 timeouts consume attempts. Connection and response-read timeouts and the delay between failed
 attempts are configurable; see the [Mock Server configuration](../pricing-mock-server/README.md).
 
-The outbox stores `batch_id`, `pricing_date`, and `processed`; notification-delivery state is not
-persisted.
+The outbox stores only `batch_id` and `processed`; neither a Pricing Date nor
+notification-delivery state is persisted in this table.
 Retry failed delivery in memory up to a configured attempt limit, defaulting to three total
 attempts: one initial attempt and at most two retries. Exhausting that limit leaves
 the accepted batch stored and stops that retry sequence. On startup or restart, send a wake-up
@@ -96,7 +96,6 @@ an account; Attribute codes are unique within an account.
 ### Outbox
 
 - `batch_id`: UUID primary key, corresponding to the submitted `batchId`.
-- `pricing_date`: non-null date containing the batch's Application Date.
 - `processed`: non-null boolean, initially `false`.
 
 ### Accounts
@@ -104,7 +103,11 @@ an account; Attribute codes are unique within an account.
 - `id`: generated bigint identity primary key.
 - `batch_id`: UUID foreign key to Outbox.
 - `account_number`, `product_code`, `branch_code`: strings using the existing API code limits.
+- `pricing_date`: non-null date containing this account's submitted `pricingDate`.
 - Unique constraint on `(batch_id, account_number)`.
+
+Accounts in one batch may have different Pricing Dates. Preserve each submitted date;
+do not derive it from the outbox or collapse the accounts to one batch-level date.
 
 ### Account attributes
 

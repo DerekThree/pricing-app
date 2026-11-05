@@ -37,19 +37,21 @@ A batch worker reads a bounded chunk of persisted account records and passes eng
 ### Resolve configuration in SQL and evaluate decisions in Java
 
 The caller supplies engine-owned account records for one Pricing Engine invocation. The Pricing
-Configuration adapter uses their distinct Pricing Date to limit Pricing Plans to those active for the submitted date. Because batches contain only one pricing date, there is no need to fetch plans that were not active on that date. The number of Branches and Regions is much smaller than the number of
+Configuration adapter uses their distinct per-account Pricing Dates to limit Pricing Plans to those
+active on at least one submitted date. A batch may contain accounts with different Pricing Dates.
+The number of Branches and Regions is much smaller than the number of
 Pricing Plans, so database-side filtering is materially more valuable for Plans than for those
 configuration records. Java receives immutable Pricing Configuration and performs Region and Fee resolution, Account Attribute validation, typed condition evaluation, waiver decisions, status mapping, and monetary calculation.
 
 - **Benefits:**
-  - Excludes Pricing Plans that were not active for the Pricing Date present in the batch before configuration is transferred to Java.
-  - Uses the batch's Pricing Date to filter the configuration type with the largest expected record count.
+  - Excludes Pricing Plans that were not active on any submitted account's Pricing Date before configuration is transferred to Java.
+  - Uses the distinct account Pricing Dates to filter the configuration type with the largest expected record count.
   - Reduces configuration transfer and Java heap use without moving Account Attribute validation, condition evaluation, waiver decisions, status mapping, or monetary calculation into SQL.
   - Keeps dynamic type handling, Eligibility Reason semantics, failure isolation, and financial rounding in Java, where they are easier to express and unit-test.
   - Avoids adding database-side filtering for Fees, Branches, and Regions, whose record counts are expected to be much smaller than the number of Pricing Plans.
 - **Costs:**
   - Splits Pricing Plan filtering between SQL and Java: SQL limits Plans by active period, while Java performs the remaining Plan selection and pricing behavior.
-  - Requires an adapter query and mapping dedicated to filtering Pricing Plans by the batch's Pricing Date.
+  - Requires an adapter query and mapping dedicated to filtering Pricing Plans by the submitted account Pricing Dates.
   - Requires PostgreSQL integration tests for active-period filtering in addition to Java pricing-rule tests.
   - May still transfer more Eligibility Reasons and Account Attribute definitions than evaluation needs because their value as database-side filters is not yet known.
   - Changes to Pricing Plan active-period semantics may require coordinated SQL and Java changes.

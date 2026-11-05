@@ -238,8 +238,9 @@ Send to Reset. Display the response when received: an error restores Send except
 failed submission allows retry with the same `batchId`; Reset starts a new batch identity.
 Completed pricing results and WebSocket delivery are outside this stage.
 
-The simulator's single Application Date is submitted once as batch-level `pricingDate` in both
-HTTP contracts. The Batch Outbox is the batch table and stores this date as `pricing_date`.
+Both submission HTTP contracts carry `pricingDate` on each account, not on the batch.
+The Mock Server stores each account's date in `accounts.pricing_date`. The Batch Outbox
+contains only `batch_id` and `processed`; it has no date column.
 
 The browser WebSocket connection wrapper remains handwritten using the native `WebSocket` API. It
 uses the generated message model, parses incoming data as unknown, and validates it against the
