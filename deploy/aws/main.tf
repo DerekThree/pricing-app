@@ -878,7 +878,6 @@ resource "aws_service_discovery_service" "processing" {
       type = "A"
     }
   }
-  health_check_custom_config {}
 }
 resource "aws_ecr_repository" "engine" {
   name                 = "pricing-engine"
