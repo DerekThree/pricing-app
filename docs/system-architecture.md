@@ -1,6 +1,6 @@
 # Planned Architecture
 
-Status: designed but unimplemented
+Status: partially implemented; follow-on asynchronous behavior remains planned
 
 ## 1. Project purpose
 
@@ -156,7 +156,24 @@ transaction recommendations.
 
 ## 6. Pricing Engine
 
-### Pricing Engine service and asynchronous processing
+### Relocation implementation status
+
+Ticket 01 provides the standalone `pricing-engine/` Spring Boot server, the relocated evaluator,
+and the immutable configuration snapshot loader. Configuration CRUD and schema migrations remain
+in `pricing-backend/`; the engine validates that existing schema without applying migrations.
+Its configuration-read mappings do not depend on the Backend executable.
+
+Ticket 02 removes the Backend synchronous batch endpoint and adds startup processing. `PricingService` discovers unprocessed Account Outbox rows and processes the discovered set serially. JPA repositories read accounts with per-account Pricing Dates and map existing evaluator output into relational recommendation records. The recommendation batch, account outcomes, Fee Request outcomes, satisfied Eligibility Reasons, and uniquely keyed Recommendation Outbox row commit in one local transaction. A separate Account Store transaction marks source completion afterward. Recommendation migrations belong to the engine; configuration and Account Store migrations retain their existing owners.
+
+Ticket 03 adds `POST /api/v1/work-available`, owned by the engine's OpenAPI contract.
+The payload-free request returns an empty HTTP 202 acknowledgement; it does not confirm completed
+pricing. `PricingController` delegates to `PricingService`, which shares one serial run between
+startup and wake-ups. After each discovered set, the run scans again until no work remains.
+Wake-ups during processing are discarded. Discovery and the transition to idle use the same lock
+as incoming wake-ups, so a notification overlapping the final empty scan starts a new run after
+that scan. There is no pending-wake-up queue or flag, healthy idle polling, or global FIFO order.
+
+### Asynchronous processing and recovery
 
 The Pricing Engine runs as its own Spring Boot server and processes batches
 asynchronously.
@@ -297,7 +314,29 @@ The HTTP wake-up notification does **not** include `batchId`. It is a generic si
 work may be available. The receiving service responds by querying PostgreSQL for unprocessed
 batches.
 
+The Pricing Engine receives `POST /api/v1/work-available` on port 8082 by default, matching the
+Account Processor's configured notification URL. It returns HTTP 202 with no response body after
+accepting the wake-up, without waiting for pricing or recommendation persistence to finish.
+The provider-owned contract is `pricing-engine/openapi.yaml`.
+
 ADR 0005: **Use HTTP wake-up notifications with PostgreSQL-backed pending-work recovery**.
+
+### Wake-up URL deployment configuration (proposed)
+
+For AWS, Terraform would construct each full wake-up URL from the shared ALB base address
+and the downstream endpoint path. It would supply the URL through the container `environment`
+configuration in the producing service's ECS task definition:
+
+- Account Processor: `PRICING_ENGINE_WAKE_UP_URL`.
+- Pricing Engine: `TRANSACTION_PROCESSOR_WAKE_UP_URL`.
+
+Spring reads these variables through the placeholders in `application.properties`. The URLs
+are supplied when containers start, so images need no environment-specific URL configuration
+at build time and deployments need no manual URL entry.
+
+The dashboard uses a different mechanism in AWS: its relative API paths are resolved by the
+browser against the dashboard page's address. Server-side wake-up clients require an explicitly
+configured destination.
 
 ## 11. Transactional outbox
 
@@ -310,8 +349,9 @@ row per batch**, and `batchId` is the primary key of that row.
 The Batch Outbox schema and delivery lifecycle are specified in the
 [Mock Account Processor design](mock-account-processor-design.md).
 
-The Recommendation Outbox row is inserted once and its notification status is
-updated as publication progresses. No additional row is created for the same batch.
+The Recommendation Outbox follows the Account Store convention: one row per batch with
+`batch_id` and `processed`, initially `false`. It stores no notification-delivery state.
+Successful HTTP delivery leaves the row unchanged. The consumer marks processing completion.
 
 The producer's durable business result and the corresponding outbox row are
 written atomically in the same local PostgreSQL transaction.
@@ -325,35 +365,35 @@ This atomic transaction is local to the Recommendation Store. The architecture
 does **not** require the Account Store and Recommendation Store to remain in the
 same physical database.
 
-## 12. Outbox publisher ownership and recovery
+## 12. Outbox wake-up ownership and recovery
 
 The same service that persists a batch/result owns the outbox row for that
-batch and is responsible for publishing its wake-up notification.
+batch and is responsible for sending its wake-up notification.
 
 Normal operation:
 
 -   the service stores its durable batch/result and the one outbox row for that
     `batchId` atomically;
--   after persistence succeeds, the service publishes the HTTP wake-up
-    notification;
--   for the Recommendation Outbox, the service updates the existing row's
-    notification status rather than inserting another row.
+-   after persistence commits, the service starts an asynchronous HTTP wake-up
+    without waiting for source completion;
+-   HTTP delivery retries in memory with configured attempt limits, delays, and timeouts;
+-   acknowledgement or retry exhaustion leaves the durable output and outbox unchanged.
 
 Account Processor wake-up retries and startup recovery are specified in the
 [Mock Account Processor design](mock-account-processor-design.md).
 
 For the Pricing Engine's Recommendation Outbox, recovery behavior:
 
--   when the service starts or restarts, it scans the outbox for rows whose
-    status still requires publication;
--   as a producer it republishes any pending wake-up notifications it finds;
+-   before draining account batches on startup, it checks for Recommendation Outbox
+    rows with `processed=false` and starts a generic wake-up when any exist;
+-   the same bounded HTTP retries apply to startup wake-ups;
 -   as a consumer it processes any ready batches;
 -   continuous database polling solely for crash recovery is not part of the
     current design.
 
-The Pricing Engine may successfully send a wake-up notification and then crash before
-updating its Recommendation Outbox status. On restart, the same notification can therefore be
-sent again. This is expected and harmless because the notification contains no
+The Pricing Engine may successfully send a wake-up and restart while its recommendations
+are still unprocessed. Startup can therefore send another wake-up for the same durable work.
+This is expected and harmless because the notification contains no
 business payload; it only tells the consumer to query PostgreSQL for pending
 work.
 
@@ -386,6 +426,21 @@ If the Pricing Engine encounters that batch again, the existing outbox row with
 the same `batchId` identifies it as already completed. The Pricing Engine must
 not generate another committed recommendation result; it can instead repair the
 source-batch status.
+
+Before evaluating an unprocessed Account Batch, the engine checks for its Recommendation
+Outbox row, regardless of that row's `processed` value. Existing output is preserved and the
+Account Outbox's `processed` flag is set to `true` in its own local transaction.
+
+If a recommendation commit acknowledgement is lost, storage retries the retained result.
+A PostgreSQL unique violation on the recommendation batch or outbox primary key identifies
+already-committed output. The engine then completes the Account Outbox update without checking
+the outbox again during storage or changing the Recommendation Outbox's processing state.
+Other database constraint errors still fail. Notification starts after successful storage or
+recognition of the committed result, independently of the Account Outbox update.
+
+A restart loses calculations that never committed. Startup evaluates those batches again from
+durable account input; it adds no durable calculation cache. Committed output is recognized
+before evaluation, so changed Pricing Configuration cannot replace it during recovery.
 
 The same uniqueness rule also protects against two Pricing Engine instances
 attempting to complete the same batch concurrently: only one transaction can

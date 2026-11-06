@@ -7,6 +7,7 @@ docs/agents/triage-labels.md
 pricing-backend/
 pricing-dashboard/
 pricing-mock-server/
+pricing-engine/
 
 # Terraform generated files
 **/.terraform/

@@ -9,7 +9,11 @@ tags:
 
 ## Implemented runtime
 
-The current application is a browser SPA, one Spring Boot process, and PostgreSQL.
+The standalone `pricing-engine/` server owns evaluation and discovery of pending accounts on
+startup and HTTP wake-ups. Backend configuration CRUD and configuration migrations remain in
+`pricing-backend/`; its synchronous batch endpoint has been removed. The engine reads the Account
+Store, commits relational recommendations and their outbox in the Recommendation Store, then marks
+source completion separately.
 
 ```mermaid
 flowchart TB
@@ -21,18 +25,26 @@ flowchart TB
     subgraph Backend process
         Controllers[OpenAPI controller adapters]
         Services[Configuration services and validators]
+    end
+
+    subgraph Pricing Engine process
+        Pricing[PricingService]
         Engine[PrototypeRuleEngine]
         Adapter[JpaPriceConfigRepository]
     end
 
-    DB[(PostgreSQL)]
+    DB[(Configuration Store)]
+    Accounts[(Account Store)]
+    Recommendations[(Recommendation Store)]
 
     UI -->|CRUD and options HTTP calls| Controllers
     Simulator -->|date and options HTTP calls| Controllers
-    Simulator -->|synchronous POST /batch| Controllers
     Controllers --> Services
-    Controllers --> Engine
     Services --> DB
+    Accounts --> Pricing
+    Pricing --> Engine
+    Pricing --> Recommendations
+    Pricing -->|completion after output commit| Accounts
     Engine --> Adapter
     Adapter --> DB
 ```
@@ -64,9 +76,12 @@ dashboard route loader/action
 
 ### Pricing evaluation
 
-The simulator builds a Pricing Batch in browser state and sends `POST /batch`. `BatchController` validates batch-wide invariants, maps the generated contract model into engine-owned records, invokes the Pricing Engine, and maps results back to the contract.
-
-The current call is synchronous. The Pricing Batch and Pricing Decisions are not persisted by this path. See [[03 Workflows/Evaluate a Pricing Batch]].
+The simulator submits account records to the Mock Account Processor, which persists them and
+returns HTTP 202. Startup and payload-free `POST /api/v1/work-available` requests share one serial
+run in `PricingService`. `PricingController` acknowledges wake-ups with an empty HTTP 202 response.
+The run discovers Account Outbox rows, processes each batch through the existing evaluator, and
+scans again until no work remains. Recommendations and their outbox commit before source
+completion. See [[03 Workflows/Evaluate a Pricing Batch]].
 
 ## The two dates
 
@@ -79,7 +94,7 @@ The simulator normally copies its application date into every drafted account's 
 
 ## Configuration snapshot boundary
 
-For one Pricing Engine invocation, [JpaPriceConfigRepository.java](../../../../pricing-backend/src/main/java/com/pricing/backend/batch/JpaPriceConfigRepository.java) loads one immutable `PriceConfig`:
+For one Pricing Engine invocation, [JpaPriceConfigRepository.java](../../../../pricing-engine/src/main/java/com/pricing/engine/pricingStore/JpaPriceConfigRepository.java) loads one immutable `PriceConfig`:
 
 - every Branch and Region membership;
 - only Pricing Plans active on at least one distinct submitted Pricing Date;
@@ -89,14 +104,16 @@ The phased reads run in a read-only `REPEATABLE_READ` transaction. Evaluation be
 
 ## What is outside the current runtime
 
-The planned Account Processor, persisted account batches, separate Pricing Engine service, recommendation store, transactional outbox, HTTP wake-up notifications, and Transaction Processor do not exist in the current source path. Treat [[05 Reference/Current and Planned System]] as the boundary between implemented and planned behavior.
+The Transaction Processor remains future work. The engine's interrupted-completion recovery
+preserves committed recommendations and repairs the Account Outbox processed flag. Startup
+reevaluates batches whose output never committed. See [[05 Reference/Current and Planned System]].
 
 ## Primary implementation entry points
 
 - Backend boot: [BackendApplication.java](../../../../pricing-backend/src/main/java/com/pricing/backend/BackendApplication.java)
 - Contract: [openapi.yaml](../../../../pricing-backend/openapi.yaml)
-- Batch adapter: [BatchController.java](../../../../pricing-backend/src/main/java/com/pricing/backend/batch/BatchController.java)
-- Pricing Engine: [PrototypeRuleEngine.java](../../../../pricing-backend/src/main/java/com/pricing/engine/PrototypeRuleEngine.java)
+- Pricing orchestration: [PricingService.java](../../../../pricing-engine/src/main/java/com/pricing/engine/PricingService.java)
+- Pricing Engine: [PrototypeRuleEngine.java](../../../../pricing-engine/src/main/java/com/pricing/engine/PrototypeRuleEngine.java)
 - Dashboard routes: [routes.ts](../../../../pricing-dashboard/app/routes.ts)
 - Simulator screen: [simulator/index.tsx](../../../../pricing-dashboard/app/routes/simulator/index.tsx)
 

@@ -8,43 +8,55 @@ tags:
 
 # Evaluate a Pricing Batch
 
-The current Pricing Batch path is synchronous:
+The standalone Pricing Engine discovers pending account records on startup and HTTP wake-ups.
+`PricingController` accepts payload-free `POST /api/v1/work-available` requests with an empty
+HTTP 202 response. This acknowledges the wake-up without confirming completed pricing.
+The Backend owns configuration CRUD and no longer exposes a synchronous batch endpoint.
 
 ```mermaid
 sequenceDiagram
-    participant UI as Dashboard Simulator
-    participant API as BatchController
+    participant S as PricingService
+    participant A as Account Store
     participant E as Pricing Engine
-    participant R as Configuration Repository
-    participant DB as PostgreSQL
-
-    UI->>API: POST /batch
-    API->>API: contract and batch validation
-    API->>E: RuleEngineBatch
-    E->>R: load(distinct Pricing Dates)
-    R->>DB: phased REPEATABLE_READ queries
-    DB-->>R: candidate Pricing Configuration
-    R-->>E: immutable PriceConfig
-    E-->>API: RuleEngineBatchResult
-    API-->>UI: 200 BatchResult
+    participant C as Configuration Store
+    participant R as Recommendation Store
+    loop discover and drain until no unprocessed batches remain
+        S->>A: discover unprocessed account batch identifiers
+        loop one discovered account batch at a time
+            S->>A: read accounts, attributes, Fee Requests
+            S->>E: RuleEngineBatch with per-account Pricing Dates
+            E->>C: load immutable configuration using REPEATABLE_READ
+            E-->>S: RuleEngineBatchResult
+            S->>R: commit recommendation records and outbox atomically
+            S->>A: commit processed flag
+        end
+    end
 ```
 
-## 1. Validate and map the Pricing Batch
+## 1. Read accepted account records
 
-The generated contract validates required fields, collection sizes, scalar shapes, and basic numeric constraints. `BatchValidator` adds collection and correlation rules:
-
-- Account Numbers are unique within the Pricing Batch;
-- Fee Request IDs are unique within one account;
-- accounts, Account Attributes, and Fee Requests contain no null elements;
-- a supplied transaction amount uses increments of `0.01`.
-
-Repeated Fee codes are valid. The mapper converts generated HTTP models to engine-owned records.
-
+The Mock Account Processor validates and atomically accepts submissions into the Account Store.
+`AccountRepository` loads the account records, their individual Pricing Dates, scalar Account
+Attributes, and Fee Requests in a read-only JPA transaction. `AccountMapper` produces the existing
+engine-owned input before that transaction closes. There is no batch-level Pricing Date.
 ## 2. Load one configuration snapshot
 
 The Pricing Engine collects distinct Pricing Dates and asks `PriceConfigRepository` for one configuration. The JPA adapter loads all Branches and Regions but only Pricing Plans active on at least one submitted Pricing Date, plus their complete Fee and Eligibility Reason graph.
 
-If configuration access fails, the request returns `503`; it is not converted into per-account statuses.
+If configuration access fails, evaluation throws `PricingAccessException`. Temporary database
+failures retry the failed operation with bounded attempts and delay. Configuration access retries
+finish before calculation begins; storage retries keep the completed result unchanged and do not
+reload configuration. The current batch keeps its turn during delays. Startup recovery runs after
+singleton initialization and completes before the HTTP listener accepts wake-up calls.
+Expected account and Fee Request validation outcomes do not trigger infrastructure retries.
+
+Recommendation writes and their outbox row remain one local transaction on every attempt. After
+successful persistence, downstream notification starts before source completion. Retry exhaustion
+pauses the active worker with unfinished input unprocessed and no durable failed state. It checks
+the unavailable store's connectivity periodically and ignores wake-ups without storing or queuing
+them. Once access returns, it stores retained results unchanged and finishes any known pending
+source completion before a fresh Account Outbox scan. Normal serial processing and subsequent
+scans resume, and connectivity checks stop. Healthy idle processing does not poll.
 
 ## 3. Resolve each account
 
@@ -99,7 +111,7 @@ For each Fee Request:
 
 Fee failures are isolated to that Fee Request. Other Fee Requests and accounts continue.
 
-The current HTTP adapter rejects a supplied transaction amount that is not an increment of `0.01` before evaluation, so an HTTP caller normally receives `400` for excess decimal precision. The engine's `INVALID_TRANSACTION_AMOUNT` status remains defense at the engine boundary and is relevant to direct or future persisted-batch callers.
+The Mock Account Processor rejects a supplied transaction amount that is not an increment of `0.01` before evaluation, so an HTTP caller normally receives `400` for excess decimal precision. The engine's `INVALID_TRANSACTION_AMOUNT` status remains defense at the engine boundary and is relevant to direct or future persisted-batch callers.
 
 ## 5. Calculate the charged amount
 
@@ -112,11 +124,38 @@ The charged amount is rounded to two decimal places with `HALF_UP`. A conditionl
 
 ## 6. Correlate the result
 
-The response echoes `batchId`. Accounts are correlated by Account Number; Fee results are correlated by Fee Request ID. Result order is not a contract.
+The recommendation batch retains the input `batchId`. Accounts are correlated by Account Number; Fee results are correlated by Fee Request ID. Result order is not a contract.
 
 Successful Fee Requests have status `OK` and exactly one Pricing Decision shape:
 
 - `CHARGED` with `amount` and no Eligibility Reasons;
 - `WAIVED` with satisfied Eligibility Reason codes and no amount.
 
-The enum definitions are in [RuleEngineBatchResult.java](../../../../pricing-backend/src/main/java/com/pricing/engine/RuleEngineBatchResult.java), and executable examples are in [PrototypeRuleEngineTests.java](../../../../pricing-backend/src/test/java/com/pricing/engine/PrototypeRuleEngineTests.java) and [BatchApiTests.java](../../../../pricing-backend/src/test/java/com/pricing/backend/batch/BatchApiTests.java).
+The enum definitions are in [RuleEngineBatchResult.java](../../../../pricing-engine/src/main/java/com/pricing/engine/RuleEngineBatchResult.java), and executable examples are in [PrototypeRuleEngineTests.java](../../../../pricing-engine/src/test/java/com/pricing/engine/PrototypeRuleEngineTests.java) and [PricingPersistencePostgresTests.java](../../../../pricing-engine/src/test/java/com/pricing/engine/PricingPersistencePostgresTests.java).
+
+## 7. Persist recommendations and complete the source
+
+`RecommendationMapper` maps account and Fee Request outcomes into relational JPA entities.
+`RecommendationRepository.save` uses one local transaction to persist `recommendation_batches`,
+`account_recommendations`, `fee_request_recommendations`, satisfied Eligibility Reason codes in
+`recommendation_eligibility_reasons`, and `recommendation_outbox`. The outbox batch identifier is
+its primary key and references the recommendation batch. Recommendation records do not use JSONB.
+
+After that transaction commits, `AccountRepository.markProcessed` updates the Account Outbox in
+its own transaction. No transaction spans the stores. An output write failure rolls back the
+entire output; a source-completion failure leaves the committed recommendations intact.
+
+Startup and wake-ups share one serial run. Each discovered set is followed by another scan;
+wake-ups received during processing are discarded. The final scan and transition to idle share
+the wake-up lock, so newly committed work cannot be stranded by an overlapping wake-up.
+The healthy idle engine does not poll the outbox, and batches have no global FIFO requirement.
+Before loading or evaluating an unprocessed batch, the engine checks for its Recommendation Outbox
+row, including rows already marked processed. If it exists, the engine preserves the recommendations
+and Recommendation Outbox state and sets the Account Outbox processed flag in its own transaction.
+
+If a commit acknowledgement is lost, the engine retries storage of the retained result. A unique
+violation on the recommendation batch or outbox primary key identifies committed output and
+allows the Account Outbox update to finish, without another outbox lookup during storage.
+Other integrity failures still propagate. No configuration is reloaded for retained results.
+A restart reevaluates durable account input when its output never committed; no separate durable
+calculation cache is stored.

@@ -66,9 +66,19 @@ Use **Product Applicability**, not “product category” or “universal applic
 
 ### Pricing Batch
 
-A caller-identified collection of account records submitted together for pricing evaluation. The current API identifies it with `batchId`.
+A batch is a group of records identified by `batchId`. An account batch contains account information supplied by the Mock Account Processor. Its recommendation batch contains transaction recommendation records produced by the Pricing Engine and retains the same identifier.
 
 Use **Pricing Batch**, not “batch job” or “simulator run.”
+
+### Account Store
+
+The upstream database holding account records supplied by the Mock Account Processor and their
+Account Outbox processing state.
+
+### Recommendation Store
+
+The downstream database holding transaction recommendation records produced by the Pricing Engine
+and their Recommendation Outbox processing state.
 
 ### Pricing Engine
 
@@ -78,9 +88,9 @@ Use **Pricing Engine**, not “rule engine” or “fee calculator” in domain 
 
 ### Pricing Date
 
-The simulator's Application Date, used to evaluate every account in a Pricing Batch and determine Pricing Plan lifecycle mutability. There is one date for both purposes.
+The date belonging to an individual account that selects the applicable Pricing Plan. Accounts in the same batch may have different Pricing Dates.
 
-**Application Date** in the simulator and `pricingDate` in the API refer to this same date.
+The simulator normally supplies its Application Date as each account's pricingDate. Application Date also controls Pricing Plan lifecycle mutability.
 
 ### Fee Request
 

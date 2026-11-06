@@ -1,5 +1,7 @@
 # Project AGENTS.md
 
+- When making changes to this project's server, always check for analogous features already implemented in its other servers and follow the established conventions. This includes naming conventions, folder structure, architecture, and anything else you can think of. The more similar these servers are to each other the better. Any convention that you can find is of value and should be used when implementing new features. When implementing a feature, first look for analogous feature already existing in the same or another server in this project and follow its convention.
+
 ## Sources of truth
 
 - Domain and decisions: `docs/agents/domain.md` and `docs/ADR/`. 
@@ -18,10 +20,18 @@
 - Preserve repository and `.git` ownership.
 - Never initialize or delete a `.git` directory unless the user explicitly requests that exact
   operation.
+  - Never commit anything to git
 
 ## Graphify
 
-This project has knowledge graphs at `pricing-backend/graphify-out/` and `pricing-dashboard/graphify-out/` with god nodes, community hubs, and cross-file relationships. Run graphify commands from `pricing-backend/` or `pricing-dashboard/`.
+Each application has a knowledge graph with god nodes, community hubs, and cross-file relationships:
+
+- `pricing-backend/graphify-out/`
+- `pricing-dashboard/graphify-out/`
+- `pricing-mock-server/graphify-out/`
+- `pricing-engine/graphify-out/`
+
+Run Graphify commands from the corresponding application directory.
 
 - For `/graphify`, use the installed graphify skill or instructions before doing anything else.
 - For codebase questions, first run `graphify query "<question>"` when `graphify-out/graph.json` exists. Use `graphify path "<A>" "<B>"` for relationships and `graphify explain "<concept>"` for focused concepts.

@@ -32,33 +32,60 @@ This vault explains the implemented Pricing application for agents making featur
 
 ## Fast mental model
 
-The application has two repositories and one current runtime boundary:
+The Backend owns Pricing Configuration CRUD and schema migrations. The evaluator and configuration
+snapshot loader now belong to the standalone `pricing-engine/` Spring Boot server.
 
 ```mermaid
 flowchart TB
     Admin[Administrator] --> Dashboard[React dashboard]
-    Dashboard -->|HTTP JSON| Backend[Spring Boot backend]
+    Dashboard -->|configuration HTTP JSON| Backend[Spring Boot backend]
     Backend -->|JPA and Flyway| PostgreSQL[(PostgreSQL)]
-    Dashboard -->|Pricing Batch| Batch[/POST batch/]
-    Batch --> Engine[Pricing Engine]
-    Engine -->|loads Pricing Configuration| PostgreSQL
-    Engine -->|Pricing Decisions| Dashboard
+    Engine[Standalone Pricing Engine] -->|loads Pricing Configuration| PostgreSQL
 ```
 
-The dashboard configures Branches, Regions, Products, Fees, Account Attributes, Eligibility Reasons, and Pricing Plans. Its simulator builds a [[01 Domain/CONTEXT#Pricing Batch|Pricing Batch]] and sends it synchronously to the backend. The backend loads an immutable configuration view, resolves each account's Region and Pricing Plan, then returns one [[01 Domain/CONTEXT#Pricing Decision|Pricing Decision]] for each valid [[01 Domain/CONTEXT#Fee Request|Fee Request]].
+The Backend synchronous batch endpoint and its engine-dependent wiring have been removed.
+On startup or an HTTP wake-up, the engine discovers pending account batches in the Account Store
+and drains discovered sets serially until none remain. It commits relational recommendations and
+one outbox row in the Recommendation Store,
+then marks the Account Outbox record processed in a separate local transaction.
+After each recommendation commit, the engine sends a payload-free Transaction Processor wake-up
+on a virtual thread. Bounded in-memory retries and startup checks of `processed=false` rows follow
+the Account Store convention; HTTP delivery leaves the outbox unchanged.
+Startup recovery runs synchronously after singleton initialization and finishes before the HTTP
+listener accepts wake-up calls.
+Temporary database failures receive bounded operation retries while the current batch keeps its
+turn. After exhaustion, the active worker pauses and periodically checks the unavailable store;
+wake-ups are ignored without storage or queuing. Recovery stores retained results unchanged and
+finishes any known pending source completion before a fresh Account Outbox scan. Serial processing
+and subsequent scans resume; connectivity checks stop and healthy idle processing does not poll.
+Before evaluation, existing Recommendation Outbox rows identify committed output and allow repair
+of the Account Outbox processed flag. Storage retries recognize duplicate batch primary-key errors
+without another outbox lookup. Recovery preserves output and Recommendation Outbox state; a restart
+reevaluates durable input only when its output never committed.
 
-The repository also contains accepted and in-progress designs for persisted asynchronous batch processing. Those designs are not the current request path. See [[05 Reference/Current and Planned System]].
+See [[05 Reference/Current and Planned System]] for implemented and planned behavior.
 
 ## Repository map
 
 | Location | Responsibility |
 |---|---|
-| `pricing-backend/` | Spring Boot API, Pricing Engine, JPA persistence, Flyway migrations, OpenAPI contract, backend tests |
+| `pricing-backend/` | Configuration API, JPA persistence, Flyway migrations, OpenAPI contract, backend tests |
+| `pricing-engine/` | Wake-up API, serial batch draining, evaluator, configuration snapshot reads |
 | `pricing-dashboard/` | React Router SPA, screens and forms, generated TypeScript client, Playwright tests |
 | `docs/ADR/` | Accepted architectural and domain decisions |
 | `docs/Validations.md` | Cross-layer validation ownership and expected errors |
 | `docs/planned-system-architecture.md` | Design-in-progress for later distributed processing |
 | `.scratch/` | Local feature specs and implementation tickets; conventions are in [issue-tracker.md](../../issue-tracker.md) |
+
+## Knowledge graphs
+
+See the [project Graphify instructions](../../../../AGENTS.md#graphify) for query and update commands.
+Each application has a graph report for navigating its code and relationships:
+
+- [Backend](../../../../pricing-backend/graphify-out/GRAPH_REPORT.md)
+- [Dashboard](../../../../pricing-dashboard/graphify-out/GRAPH_REPORT.md)
+- [Mock Server](../../../../pricing-mock-server/graphify-out/GRAPH_REPORT.md)
+- [Pricing Engine](../../../../pricing-engine/graphify-out/GRAPH_REPORT.md)
 
 ## Reading rule
 

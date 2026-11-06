@@ -24,11 +24,11 @@ Avoid treating these layers as interchangeable. A dashboard check improves inter
 
 ## Error semantics
 
-Configuration requests use HTTP errors because the submitted mutation failed. Pricing evaluation uses a mixed model:
+Configuration mutations and account acceptance use HTTP errors. Pricing evaluation records outcomes:
 
-- malformed or structurally invalid Pricing Batches return HTTP `400`;
-- a configuration-load failure returns HTTP `503`;
-- expected account-resolution and Fee evaluation failures return HTTP `200` with isolated account or Fee statuses.
+- malformed or structurally invalid account submissions return HTTP `400` from the Mock Account Processor;
+- a configuration-load failure stops the startup processing run and leaves input unprocessed;
+- expected account-resolution and Fee evaluation failures are stored as isolated account or Fee Request statuses.
 
 This separation lets one invalid account or Fee Request avoid aborting other independent work in the Pricing Batch.
 
@@ -65,6 +65,6 @@ Check these pairs whenever either side changes:
 - [GlobalExceptionHandler.java](../../../../pricing-backend/src/main/java/com/pricing/backend/config/GlobalExceptionHandler.java)
 - [PricingPlanValidator.java](../../../../pricing-backend/src/main/java/com/pricing/backend/pricingplan/PricingPlanValidator.java)
 - [EligibilityReasonValidator.java](../../../../pricing-backend/src/main/java/com/pricing/backend/eligibilityreason/EligibilityReasonValidator.java)
-- [BatchValidator.java](../../../../pricing-backend/src/main/java/com/pricing/backend/batch/BatchValidator.java)
+- [BatchValidator.java](../../../../pricing-mock-server/src/main/java/com/pricing/mockserver/batch/BatchValidator.java)
 - [PostgreSQL active-period migration](../../../../pricing-backend/src/main/resources/db/postgresql/V17__prevent_overlapping_pricing_plan_active_periods.sql)
 

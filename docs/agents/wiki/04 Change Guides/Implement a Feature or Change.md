@@ -25,8 +25,8 @@ Use this note to find the implementation seam and the evidence that defines corr
 | Change Pricing Plan lifecycle | `PricingPlanValidator`, options, database periods | `pricingPlans/crud.tsx` disabled/date behavior | ADR 0001 and `PricingPlanApiTests` |
 | Change Product Applicability | Fee/Account Attribute entities and validators; Eligibility Reason derivation | related forms and option filtering | ADR 0003 plus API and Playwright tests |
 | Change Region resolution | `PrototypeRuleEngine`; Region persistence constraints | Region form/options | engine tests and Region API tests |
-| Change Pricing Decision logic | engine-owned records and `PrototypeRuleEngine` | simulator response rendering | engine tests, batch API tests, simulator E2E |
-| Change batch request/result | `openapi.yaml`; batch validator/mapper/controller | regenerated client; simulator composition/correlation | contract API tests and simulator E2E |
+| Change Pricing Decision logic | engine-owned records, `PrototypeRuleEngine`, recommendation mapper | persisted recommendations | evaluator and mapper tests; PostgreSQL only for storage behavior |
+| Change account submission | Mock Account Processor `openapi.yaml`, validator, mapper, controller | regenerated processor client; simulator composition | processor contract/API tests |
 | Change a database constraint | Flyway migration; entity mapping; exception handler | error display only if behavior changes | H2 API tests and PostgreSQL Testcontainers tests |
 
 ## Configuration CRUD seam
@@ -50,9 +50,9 @@ Keep transaction ownership in the service. Use a validator for cross-record or l
 
 ## Pricing Engine seam
 
-Keep evaluation behavior inside `com.pricing.engine`. Engine records should not depend on generated HTTP models or JPA entities. Persistence-specific filtering and graph loading belong behind `PriceConfigRepository`; mapping from JPA entities belongs in the batch adapter.
+Keep evaluation behavior inside `com.pricing.engine`. Engine records should not depend on generated HTTP models or JPA entities. Persistence-specific filtering and graph loading belong behind `PriceConfigRepository`; account input mapping belongs in `AccountMapper`, and recommendation output mapping belongs in `RecommendationMapper`. Store reads and writes use JPA repositories and explicitly named local transaction managers.
 
-When adding a status or Pricing Decision field, update the engine model and behavior first, then map it through `BatchMapper` and the OpenAPI model. Verify identifier correlation and ensure one failed Fee Request does not abort unrelated work unless the new behavior deliberately changes failure isolation.
+When adding a status or Pricing Decision field, update the engine model and behavior first, then update `RecommendationMapper`, recommendation entities, and a new migration if the stored shape changes. Verify identifier correlation and ensure one failed Fee Request does not abort unrelated work unless the new behavior deliberately changes failure isolation.
 
 ## Dashboard seam
 

@@ -11,6 +11,7 @@ tags:
 Each provider owns its HTTP contract: [pricing-backend/openapi.yaml](../../../../pricing-backend/openapi.yaml)
 defines the Backend API; [pricing-mock-server/openapi.yaml](../../../../pricing-mock-server/openapi.yaml)
 defines the Mock Account Processor API.
+The [engine contract](../../../../pricing-engine/openapi.yaml) defines its wake-up API.
 
 ```mermaid
 flowchart TB
@@ -25,6 +26,11 @@ flowchart TB
 ## Backend generation
 
 The Maven build generates Spring interfaces in `com.pricing.backend.generated.api` and models in `com.pricing.backend.generated.model`. Handwritten controllers implement the interfaces. Contract constraints become Jakarta validation on generated request models.
+
+The engine uses the same Maven generation pattern with `com.pricing.engine.generated.api` and
+`com.pricing.engine.generated.model`. `PricingController` implements `PricingApi` and delegates
+to `PricingService`. The payload-free `POST /api/v1/work-available` returns an empty HTTP 202
+acknowledgement; it does not confirm completed pricing or persisted recommendations.
 
 ## Dashboard generation
 
@@ -53,19 +59,19 @@ Generated code is evidence of the contract, not the editing surface. Change the 
 ## Response conventions
 
 - Create returns `201`; successful reads and updates return `200`; deletion returns `204`.
+- The Pricing Engine accepts generic wake-ups with `202` and no response body.
 - Contract and business-rule validation normally return `400`.
 - Missing resources return `404`.
 - uniqueness, reference, and record-in-use conflicts return `409`.
-- a Pricing Configuration access failure during batch evaluation returns `503`.
 - error bodies use `ErrorResponse.message`.
 
 The shared dashboard CRUD action checks the expected success status for each operation. A backend status change therefore requires an intentional dashboard change even when the JSON body is unchanged.
 
-## Batch correlation contract
+## Account acceptance and recommendation correlation
 
-The Pricing Batch contract uses three correlation levels:
+Account acceptance and stored recommendations preserve three correlation levels:
 
-- `batchId` identifies the Pricing Batch and is echoed by the result;
+- `batchId` identifies the account batch and its corresponding recommendation batch;
 - `accountNumber` identifies an account within that batch and must be unique there;
 - `feeRequestId` identifies a Fee Request within one account and must be unique there.
 
@@ -73,11 +79,11 @@ The same Fee Request ID may appear in different accounts, and one account may re
 
 ## Scalar Account Attribute values
 
-The contract permits Account Attribute values that are strings, numbers, or booleans. Backend Jackson configuration maps that generated union-like interface through a custom deserializer. The Pricing Engine later compares the runtime value to the configured Account Attribute type and returns an account status for a mismatch.
+The contract permits Account Attribute values that are strings, numbers, or booleans. Backend configuration conditions and Mock Account Processor submissions map their generated scalar interfaces through custom Jackson deserializers. The engine reads persisted Account Attribute scalars through a JPA converter. The Pricing Engine later compares the runtime value to the configured Account Attribute type and returns an account status for a mismatch.
 
 Related implementation:
 
 - [JacksonConfig.java](../../../../pricing-backend/src/main/java/com/pricing/backend/config/JacksonConfig.java)
-- [BatchMapper.java](../../../../pricing-backend/src/main/java/com/pricing/backend/batch/BatchMapper.java)
-- [BatchRequestContractApiTests.java](../../../../pricing-backend/src/test/java/com/pricing/backend/batch/BatchRequestContractApiTests.java)
+- [AccountMapper.java](../../../../pricing-engine/src/main/java/com/pricing/engine/accountStore/AccountMapper.java)
+- [PricingPersistencePostgresTests.java](../../../../pricing-engine/src/test/java/com/pricing/engine/PricingPersistencePostgresTests.java)
 

@@ -8,7 +8,7 @@ tags:
 
 # Backend architecture
 
-The backend is a Java 21 Spring Boot application organized by feature package, with a separate `com.pricing.engine` package for evaluation behavior.
+The backend is a Java 21 Spring Boot application organized by feature package, with evaluation owned by the standalone `pricing-engine/` server.
 
 ## Contract-first HTTP boundary
 
@@ -19,7 +19,6 @@ Endpoint families are:
 - `/branches`, `/regions`, `/products`, `/fees`;
 - `/account-attributes`, `/eligibility-reasons`, `/pricing-plans`;
 - `/simulator/date`, `/simulator/options`;
-- `/batch`.
 
 See [[02 Architecture/API Contract]] before changing any endpoint or payload.
 
@@ -57,15 +56,19 @@ The current schema is defined by migrations. The root `DB Schema.txt` is histori
 
 ## Pricing Engine boundary
 
+The standalone `pricing-engine/` server owns evaluation and configuration snapshot reads. Backend
+configuration CRUD and configuration-schema migrations remain here. The synchronous batch endpoint, its contract operation, and engine-dependent wiring have been removed. The engine independently reads accounts and persists transaction recommendations using JPA repositories and separate local store transactions.
+
 The engine owns transport- and JPA-independent records:
 
-- [RuleEngineBatch.java](../../../../pricing-backend/src/main/java/com/pricing/engine/RuleEngineBatch.java) for input;
-- [PriceConfig.java](../../../../pricing-backend/src/main/java/com/pricing/engine/PriceConfig.java) for immutable configuration;
-- [RuleEngineBatchResult.java](../../../../pricing-backend/src/main/java/com/pricing/engine/RuleEngineBatchResult.java) for statuses and Pricing Decisions;
-- [RuleEngine.java](../../../../pricing-backend/src/main/java/com/pricing/engine/RuleEngine.java) as the interface;
-- [PrototypeRuleEngine.java](../../../../pricing-backend/src/main/java/com/pricing/engine/PrototypeRuleEngine.java) as the implementation.
+- [RuleEngineBatch.java](../../../../pricing-engine/src/main/java/com/pricing/engine/RuleEngineBatch.java) for input;
+- [PriceConfig.java](../../../../pricing-engine/src/main/java/com/pricing/engine/PriceConfig.java) for immutable configuration;
+- [RuleEngineBatchResult.java](../../../../pricing-engine/src/main/java/com/pricing/engine/RuleEngineBatchResult.java) for statuses and Pricing Decisions;
+- [PrototypeRuleEngine.java](../../../../pricing-engine/src/main/java/com/pricing/engine/PrototypeRuleEngine.java) as the implementation.
 
-`JpaPriceConfigRepository` is the JPA adapter behind the engine-owned `PriceConfigRepository` interface. It filters candidate Pricing Plans in SQL by submitted Pricing Dates, then Java performs exact Region and Pricing Plan selection, validation, typed comparison, waiver evaluation, and amount calculation.
+`JpaPriceConfigRepository` loads the engine's immutable pricing configuration. It filters candidate
+Pricing Plans in SQL by submitted Pricing Dates, then Java performs exact Region and Pricing Plan
+selection, validation, typed comparison, waiver evaluation, and amount calculation.
 
 ## Error boundary
 
@@ -87,7 +90,8 @@ Database constraint names are part of error mapping. A migration that renames a 
 
 ## Test layers
 
-- `PrototypeRuleEngineTests` exercise evaluation behavior with in-memory configuration.
+- In `pricing-engine/`, moved `PrototypeRuleEngineTests` cover in-memory evaluation and moved
+  `JpaPriceConfigRepositoryTests` cover configuration snapshots against H2 and server startup.
 - Spring Boot and MockMvc API tests exercise contracts, services, JPA mappings, errors, and end-to-end configuration behavior against H2 in PostgreSQL compatibility mode.
 - Testcontainers PostgreSQL tests cover exclusion constraints, PostgreSQL migrations, configuration filtering, query shape, and `REPEATABLE_READ` snapshot behavior.
 - `OpenApiContractAlignmentTests` checks the served contract boundary.

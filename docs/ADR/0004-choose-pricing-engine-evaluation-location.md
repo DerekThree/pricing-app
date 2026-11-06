@@ -114,14 +114,28 @@ The batch worker or an adapter reads the smaller Pricing Configuration snapshot 
 
 ## Decision
 
-Resolve candidate Pricing Plans by submitted Pricing Date in the PostgreSQL configuration adapter,
+Resolve candidate Pricing Plans using all distinct per-account Pricing Dates in the PostgreSQL adapter,
 then evaluate Region selection, exact Pricing Plan selection, validation, eligibility, Fee calculation,
 and statuses in Java.
 
 The adapter loads one immutable Pricing Configuration per Pricing Engine invocation using phased bulk
 reads in one read-only `REPEATABLE_READ` transaction. Java evaluation starts after that transaction
 closes. This decision selects the evaluation boundary; account-batch persistence, notification,
-Pricing Decision persistence, and database topology remain separate open decisions.
+Pricing Decision persistence, and database topology are specified separately by the asynchronous Pricing Engine workflow.
+
+The evaluator, engine-owned input/result/configuration models, and configuration-read adapter live
+in the standalone `pricing-engine/` Spring Boot server. The Backend retains configuration CRUD and
+schema migrations. The engine has local JPA read mappings, validates the existing schema, and has
+no dependency on the Backend executable or a shared pricing-engine library.
+
+Tickets 01 and 02 complete the cutover: the Backend synchronous batch endpoint is removed, and engine startup processes pending account records serially. Account and Recommendation Stores have separate JPA persistence units and local transactions. Relational recommendation records and one uniquely keyed outbox row commit together before source completion. The Backend owns configuration migrations, the Mock Account Processor owns Account Store migrations, and the engine owns Recommendation Store migrations. Subsequent tickets add wake-ups, further scans, notification delivery, and recovery.
+
+Ticket 07 recognizes an existing Recommendation Outbox row before evaluation and repairs the
+Account Outbox's processed flag in its own transaction. When a commit acknowledgement is lost,
+storage retries rely on the recommendation batch primary-key constraint to recognize committed
+output, without another outbox lookup. Recovery preserves the result and Recommendation Outbox
+processing state. Startup reevaluates durable account input only when its output never committed;
+there is no separate durable cache of calculations.
 
 ## Rationale
 

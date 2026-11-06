@@ -49,27 +49,11 @@
 | A condition value matches its attribute type | Yes | No | Yes | 400 — `Condition value for account attribute <code> must be an integer` | No |
 | A condition value is a string, number, or boolean | Yes | Yes | Yes | 400 — `Condition value must be a string, number, or boolean` | No |
 | A Branch, Product, Region, Fee, Account Attribute, or Eligibility Reason cannot be deleted while referenced | No | No | Yes | 409 — `This <record> is used by <referencing record> with code <code>. Please update the <referencing record> first.` | Yes — restrictive FK |
-| Batch ID is a UUID | No | Yes | No | 400 — generated request validation | No |
-| A Batch contains at least one Account | No | Yes | No | 400 — generated request validation | No |
-| A Batch Account contains at least one Fee Request | No | Yes | No | 400 — generated request validation | No |
-| Batch Account, Attribute, and Fee Request collections contain no null elements | No | Yes | Yes | 400 — `<collection> must not contain null items` | No |
-| Account Number is an uppercase alphanumeric string no longer than 25 characters | No | Yes | No | 400 — generated request validation | No |
-| Fee Request ID is a required 64-bit integer | No | Yes | No | 400 — generated request validation | No |
-| Account Numbers are unique within a Pricing Batch | No | No | Yes | 400 — `Account numbers must be unique within the Pricing Batch` | No |
-| Fee Request IDs are unique within one Account | No | No | Yes | 400 — `Fee Request IDs must be unique within an account` | No |
-| A Batch Account Attribute value is a string, number, or boolean | No | Yes | No | 400 — generated request validation | No |
-| A required Batch Account Attribute occurs at most once | No | No | Yes | HTTP 200 account outcome `DUPLICATE_ATTRIBUTE`; no error message | No |
-| A supplied required Batch Account Attribute matches its configured type | No | No | Yes | HTTP 200 account outcome `INVALID_ATTRIBUTE_TYPE`; no error message | No |
-| Every required Batch Account Attribute is supplied | No | No | Yes | HTTP 200 account outcome `MISSING_ATTRIBUTE`; no error message | No |
-| A persisted Eligibility Reason condition uses an operator supported by its configured Attribute type during Pricing Batch evaluation | No | No | Yes | HTTP 200 Fee outcome `ERROR`; no error message | Partial â€” the operator is constrained, but the operator-and-type combination is not |
-| A Batch Account has an applicable Pricing Plan for its Product, Region, and Pricing Date | No | No | Yes | HTTP 200 account outcome `PLAN_NOT_FOUND`; no error message | No |
-| A present Batch transaction amount is non-null, non-negative, and uses increments of 0.01 | No | Yes | Yes | 400 — generated null/minimum validation or `Transaction Amount must use increments of 0.01` | No |
 
 ## Mock Account Processor — Account Store
 
 The provider-owned Mock Account Processor contract is `pricing-mock-server/openapi.yaml`.
-The existing Pricing Backend validation rows above remain applicable to its synchronous endpoint.
-Submission validation uses the same contract schemas and `BatchValidator` rules; configuration
+The Backend synchronous batch endpoint has been removed. Submission validation belongs to the Mock Account Processor contract and its `BatchValidator`; configuration
 type compatibility and required-attribute checks remain Pricing Engine evaluation concerns.
 
 Submission error messages include zero-based field paths, such as
@@ -85,7 +69,6 @@ The response remains `code` plus `message`. The table lists the reasons before v
 | Submission shapes and collection items must be valid and non-null | No | Yes | Yes — null collection items | 400 — `INVALID_BATCH`, field validation, `Request body is malformed`, or descriptive null-item message | No |
 | Required submission values and existing code formats/limits are preserved | No | Yes | No | 400 — `INVALID_BATCH`, descriptive validation message | Yes — required columns non-null; strings limited to 25 characters |
 | Accounts per Pricing Batch must not exceed `BATCH_MAX_ACCOUNTS` (default `100000`) | No | Yes — runtime limit documented | Yes — `BatchValidator`, before persistence | 400 — `INVALID_BATCH`, `Pricing Batch exceeds the limit of <limit> accounts (<count> submitted).` | No — rejection leaves no partial batch |
-| Account Numbers are unique within a Pricing Batch | No | No | Yes | 400 — `INVALID_BATCH`, `Account numbers must be unique within the Pricing Batch` | Yes — unique `(batch_id, account_number)` |
 | Previously accepted Batch IDs are rejected regardless of payload differences | No | Yes | Yes — insert-only persistence; centralized constraint handling | 409 — `BATCH_ALREADY_ACCEPTED`, `This Pricing Batch has already been accepted` with the Batch ID | Yes — `batch_outbox` primary key; rejected transactions leave all accepted rows unchanged |
 | Submitted Fee Request IDs are unique within an Account | No | No | Yes | 400 — `INVALID_BATCH`, `Fee Request IDs must be unique within an account` | Yes — unique `(account_id, fee_request_id)`; generated bigint `id` is the primary key |
 | Attribute values retain string, number, or boolean scalar type; repeated codes remain separate rows | No | Yes | No | 400 — `INVALID_BATCH` for malformed values; persisted scalar-check violations return `Account Attribute value must be a string, number, or boolean` | Yes — non-null JSONB scalar check; no uniqueness on attribute code |
@@ -93,3 +76,26 @@ The response remains `code` plus `message`. The table lists the reasons before v
 | Accounts reference a batch; attributes and Fee Requests reference an account | No | No | No | 400 — `INVALID_BATCH`, `The request violates a database constraint` | Yes — foreign keys |
 | Acceptance requires atomic commit of all accounts, attributes, Fee Requests, and the Batch Outbox | No | Yes | Yes | 202 after commit; 503 — `ACCOUNT_STORE_UNAVAILABLE` when the store is unavailable | Yes — one transaction; rollback leaves no partial batch |
 | Pricing Engine wake-ups advertise only committed work and carry no business payload or Batch ID | No | No | Yes — asynchronous post-commit empty HTTP POST; failed or rejected transactions do not notify | 202 remains accepted through delivery errors and bounded retry exhaustion | Accepted rows and `processed` remain unchanged; no delivery state is stored |
+
+## Pricing Engine — Recommendation Store
+
+The engine evaluates persisted accounts using each account's Pricing Date. It records expected
+account and Fee Request failures as outcomes; it exposes no pricing HTTP operation in this ticket.
+
+| Validation | UI | API contract | Engine logic | Outcome | DB |
+| --- | --- | --- | --- | --- | --- |
+| A required Batch Account Attribute occurs at most once | No | No | Yes | Stored account outcome `DUPLICATE_ATTRIBUTE`; no error message | No |
+| A supplied required Batch Account Attribute matches its configured type | No | No | Yes | Stored account outcome `INVALID_ATTRIBUTE_TYPE`; no error message | No |
+| Every required Batch Account Attribute is supplied | No | No | Yes | Stored account outcome `MISSING_ATTRIBUTE`; no error message | No |
+| A persisted Eligibility Reason condition uses an operator supported by its configured Attribute type during Pricing Batch evaluation | No | No | Yes | Stored Fee Request outcome `ERROR`; no error message | Partial â€” the operator is constrained, but the operator-and-type combination is not |
+| A Batch Account has an applicable Pricing Plan for its Product, Region, and Pricing Date | No | No | Yes | Stored account outcome `PLAN_NOT_FOUND`; no error message | No |
+| One Recommendation Outbox row per batch identifier | No | No | Insert-only JPA persistence; a duplicate batch or outbox primary-key error during storage identifies committed output | Preserve output and repair Account Outbox processing status; other constraint errors still fail | Yes — batch identifier primary key and FK to recommendation batch |
+| Recommendation batch, records, and outbox commit atomically | No | No | One local Recommendation Store transaction | A write failure leaves no partial output | Yes — transaction rollback |
+| Source completion follows recommendation commit | No | No | Separate Account Store transaction after output save succeeds or its duplicate batch key identifies committed output | Uncommitted output failure leaves input unprocessed; source failure preserves committed output | No cross-store transaction |
+| Restart recovery preserves committed recommendations | No | No | Before evaluation, check the Recommendation Outbox by batch ID regardless of its processed flag; repair the Account Outbox flag when output exists | Preserve result and Recommendation Outbox state despite changed configuration; no recalculation of committed output | Separate Account and Recommendation Store transactions |
+| Restart recovery recalculates output that never committed | No | No | Discover unprocessed durable account input on startup | No partial recommendations or durable calculation cache; evaluate again using configuration captured on restart | Recommendation records and outbox commit atomically |
+| Transaction Processor wake-ups advertise only committed output and carry no Batch ID or payload | No | No | Virtual thread starts after recommendation save commits, before source completion | Rollback sends no wake-up; source-completion failure does not suppress delivery | Recommendation rows and outbox commit atomically |
+| Temporary database failures retry only the interrupted operation | No | No | Configured bounded attempts and delay; the active batch keeps its turn; exhaustion starts periodic connectivity checks of the unavailable store and ignores wake-ups | Unfinished input stays unprocessed with no durable failed state; checks stop after recovery and there is no healthy idle polling | Every storage attempt preserves the existing local transaction boundaries |
+| Storage failures preserve completed calculations | No | No | Retain the same result in memory through failures and exhaustion; after connectivity returns, store it unchanged before a fresh Account Outbox scan | Configuration changes do not alter the retained result; known pending source completion finishes before scanning; no recalculation | Recommendation records and outbox commit atomically |
+| HTTP failures and timeouts preserve completed pricing | No | No | Bounded in-memory retries with configured attempts, delay, and HTTP timeout | Delivery stops after success or exhaustion; no recalculation or result changes | Successful or failed HTTP delivery leaves the existing outbox row unchanged |
+| Startup wakes the Transaction Processor for unprocessed recommendations | No | No | Singleton-initialization callback checks `processed=false` before account draining and HTTP listener startup | Empty or processed-only stores send no wake-up; duplicate delivery preserves results | Existing outbox processing state remains authoritative |

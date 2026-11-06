@@ -99,7 +99,10 @@ HTTP is sufficient because the notification is intentionally weak: it means only
 
 - PostgreSQL must represent enough processing state for consumers to identify unprocessed batches safely.
 - The Pricing Engine and Transaction Processor must check for unprocessed work on startup or restart.
-- HTTP endpoint and request-response details still need to be defined.
+- The Pricing Engine receives a payload-free `POST /api/v1/work-available` and returns an empty
+  HTTP 202 acknowledgement. This accepts the wake-up without confirming completed pricing.
+  Its provider-owned contract is `pricing-engine/openapi.yaml`; the Transaction Processor's
+  request-response details remain to be defined.
 - Duplicate notofications are acceptable and should not create duplicate business results.
 - Batch-processing idempotency is resolved by maintaining batch status in DB outbox.
 - Kafka, Amazon SQS, RabbitMQ, and EventBridge are not part of the current notification architecture.
