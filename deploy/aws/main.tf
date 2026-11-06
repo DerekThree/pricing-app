@@ -43,6 +43,12 @@ variable "account_password" {
   sensitive   = true
   default     = null
 }
+variable "recommendation_password" {
+  description = "Recommendation database password supplied only during initial creation."
+  type        = string
+  sensitive   = true
+  default     = null
+}
 variable "mock_server_desired_count" {
   type    = number
   default = 0
@@ -52,6 +58,17 @@ variable "mock_server_desired_count" {
       floor(var.mock_server_desired_count) == var.mock_server_desired_count
     )
     error_message = "mock_server_desired_count must be a nonnegative integer."
+  }
+}
+variable "engine_desired_count" {
+  type    = number
+  default = 0
+  validation {
+    condition = (
+      var.engine_desired_count >= 0 &&
+      floor(var.engine_desired_count) == var.engine_desired_count
+    )
+    error_message = "engine_desired_count must be a nonnegative integer."
   }
 }
 variable "backend_desired_count" {
@@ -99,7 +116,7 @@ locals {
 resource "aws_vpc" "pricing" {
   cidr_block           = "10.0.0.0/16"
   enable_dns_support   = true
-  enable_dns_hostnames = false
+  enable_dns_hostnames = true
   instance_tenancy     = "default"
   tags                 = { Name = "pricing-app-vpc" }
 }
@@ -200,7 +217,8 @@ resource "aws_security_group" "database" {
     protocol    = "tcp"
     security_groups = [
       aws_security_group.backend.id,
-      aws_security_group.mock_server.id,
+      aws_security_group.account_processor.id,
+      aws_security_group.engine.id,
       aws_security_group.database_init.id
     ]
   }
@@ -312,7 +330,8 @@ resource "aws_iam_role_policy" "execution_secret" {
       Action = "secretsmanager:GetSecretValue"
       Resource = [
         aws_secretsmanager_secret.rds_password.arn,
-        aws_secretsmanager_secret.account_password.arn
+        aws_secretsmanager_secret.account_password.arn,
+        aws_secretsmanager_secret.recommendation_password.arn
       ]
     }]
   })
@@ -488,6 +507,7 @@ resource "aws_ecs_task_definition" "dashboard" {
   }])
 }
 resource "aws_ecs_service" "backend" {
+  wait_for_steady_state              = true
   name                               = "pricing-backend-service"
   cluster                            = aws_ecs_cluster.pricing.id
   task_definition                    = aws_ecs_task_definition.backend.arn
@@ -559,23 +579,6 @@ output "alb_dns_name" {
   value = var.alb_enabled ? aws_lb.pricing[0].dns_name : null
 }
 
-resource "aws_security_group" "mock_server" {
-  name        = "pricing-app-mock-server-sg"
-  description = "Security group for Pricing App Mock Processor ECS tasks"
-  vpc_id      = aws_vpc.pricing.id
-  ingress {
-    from_port       = 8081
-    to_port         = 8081
-    protocol        = "tcp"
-    security_groups = [aws_security_group.alb.id]
-  }
-  egress {
-    from_port   = 0
-    to_port     = 0
-    protocol    = "-1"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-}
 resource "aws_security_group" "database_init" {
   name        = "pricing-app-database-init-sg"
   description = "Security group for the database initialization task"
@@ -595,6 +598,18 @@ resource "aws_secretsmanager_secret_version" "account_password" {
   count         = 1
   secret_id     = aws_secretsmanager_secret.account_password.id
   secret_string = jsonencode({ password = var.account_password })
+  lifecycle {
+    ignore_changes = [secret_string]
+  }
+}
+resource "aws_secretsmanager_secret" "recommendation_password" {
+  name                    = "pricing-app/recommendation-password"
+  recovery_window_in_days = 0
+}
+resource "aws_secretsmanager_secret_version" "recommendation_password" {
+  count         = 1
+  secret_id     = aws_secretsmanager_secret.recommendation_password.id
+  secret_string = jsonencode({ password = var.recommendation_password })
   lifecycle {
     ignore_changes = [secret_string]
   }
@@ -634,6 +649,10 @@ resource "aws_ecs_task_definition" "database_init" {
       {
         name      = "ACCOUNT_PASSWORD"
         valueFrom = format("%s:password::", aws_secretsmanager_secret.account_password.arn)
+      },
+      {
+        name      = "RECOMMENDATION_PASSWORD"
+        valueFrom = format("%s:password::", aws_secretsmanager_secret.recommendation_password.arn)
       }
     ]
     logConfiguration = {
@@ -649,6 +668,7 @@ resource "aws_ecs_task_definition" "database_init" {
     aws_iam_role_policy.execution_secret,
     aws_iam_role_policy_attachment.execution_base,
     aws_secretsmanager_secret_version.account_password,
+    aws_secretsmanager_secret_version.recommendation_password,
     aws_route_table_association.public
   ]
 }
@@ -703,6 +723,13 @@ resource "aws_ecs_task_definition" "mock_server" {
     environment = [
       { name = "SPRING_DATASOURCE_USERNAME", value = "accountuser" },
       {
+        name = "ENGINE_WAKE_UP_URL"
+        value = format(
+          "http://engine.%s:8082/api/v1/work-available",
+          aws_service_discovery_private_dns_namespace.processing.name
+        )
+      },
+      {
         name = "SPRING_DATASOURCE_URL"
         value = format(
           "jdbc:postgresql://%s:%s/accountdb",
@@ -734,6 +761,7 @@ resource "aws_ecs_task_definition" "mock_server" {
   }])
 }
 resource "aws_ecs_service" "mock_server" {
+  wait_for_steady_state              = true
   name                               = "pricing-mock-server-service"
   cluster                            = aws_ecs_cluster.pricing.id
   task_definition                    = aws_ecs_task_definition.mock_server.arn
@@ -751,9 +779,15 @@ resource "aws_ecs_service" "mock_server" {
     rollback = true
   }
   network_configuration {
-    subnets          = [aws_subnet.public["a"].id]
-    security_groups  = [aws_security_group.mock_server.id]
+    subnets = [aws_subnet.public["a"].id]
+    security_groups = [
+      aws_security_group.account_processor.id,
+      aws_security_group.transaction_processor.id
+    ]
     assign_public_ip = true
+  }
+  service_registries {
+    registry_arn = aws_service_discovery_service.processing["mock-server"].arn
   }
   dynamic "load_balancer" {
     for_each = var.alb_enabled ? [1] : []
@@ -775,4 +809,198 @@ output "database_init" {
     subnet          = aws_subnet.public["a"].id
     security_group  = aws_security_group.database_init.id
   }
+}
+
+# Engine and mock processor wake-ups use private task addresses.
+resource "aws_security_group" "account_processor" {
+  name        = "Account Processor"
+  description = "Security group for account processor ECS tasks"
+  vpc_id      = aws_vpc.pricing.id
+  ingress {
+    from_port       = 8081
+    to_port         = 8081
+    protocol        = "tcp"
+    security_groups = [aws_security_group.alb.id]
+  }
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+}
+resource "aws_security_group" "engine" {
+  name        = "Engine"
+  description = "Security group for engine ECS tasks"
+  vpc_id      = aws_vpc.pricing.id
+  ingress {
+    from_port       = 8082
+    to_port         = 8082
+    protocol        = "tcp"
+    security_groups = [aws_security_group.account_processor.id]
+  }
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+}
+resource "aws_security_group" "transaction_processor" {
+  name        = "Transaction Processor"
+  description = "Security group for transaction processor ECS tasks"
+  vpc_id      = aws_vpc.pricing.id
+  ingress {
+    from_port       = 8081
+    to_port         = 8081
+    protocol        = "tcp"
+    security_groups = [aws_security_group.engine.id]
+  }
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+}
+resource "aws_service_discovery_private_dns_namespace" "processing" {
+  name = "pricing.internal"
+  vpc  = aws_vpc.pricing.id
+}
+resource "aws_service_discovery_service" "processing" {
+  for_each = toset(["engine", "mock-server"])
+  name     = each.key
+  dns_config {
+    namespace_id   = aws_service_discovery_private_dns_namespace.processing.id
+    routing_policy = "MULTIVALUE"
+    dns_records {
+      ttl  = 10
+      type = "A"
+    }
+  }
+  health_check_custom_config {}
+}
+resource "aws_ecr_repository" "engine" {
+  name                 = "pricing-engine"
+  image_tag_mutability = "MUTABLE"
+  force_delete         = true
+  image_scanning_configuration { scan_on_push = false }
+  encryption_configuration { encryption_type = "AES256" }
+}
+resource "aws_ecs_task_definition" "engine" {
+  family                   = "pricing-engine"
+  network_mode             = "awsvpc"
+  requires_compatibilities = ["FARGATE"]
+  cpu                      = "512"
+  memory                   = "1024"
+  execution_role_arn       = aws_iam_role.execution.arn
+  container_definitions = jsonencode([{
+    name      = "Main"
+    image     = format("%s:latest", aws_ecr_repository.engine.repository_url)
+    essential = true
+    portMappings = [{
+      containerPort = 8082
+      hostPort      = 8082
+      protocol      = "tcp"
+      name          = "main-8082-tcp"
+    }]
+    environment = [
+      { name = "SPRING_DATASOURCE_USERNAME", value = aws_db_instance.pricing.username },
+      {
+        name = "SPRING_DATASOURCE_URL"
+        value = format(
+          "jdbc:postgresql://%s:%s/pricingdb",
+          aws_db_instance.pricing.address, aws_db_instance.pricing.port
+        )
+      },
+      { name = "ACCOUNT_STORE_USERNAME", value = "accountuser" },
+      {
+        name = "ACCOUNT_STORE_URL"
+        value = format(
+          "jdbc:postgresql://%s:%s/accountdb",
+          aws_db_instance.pricing.address, aws_db_instance.pricing.port
+        )
+      },
+      { name = "RECOMMENDATION_STORE_USERNAME", value = "recommendationuser" },
+      {
+        name = "RECOMMENDATION_STORE_URL"
+        value = format(
+          "jdbc:postgresql://%s:%s/recommendationdb",
+          aws_db_instance.pricing.address, aws_db_instance.pricing.port
+        )
+      },
+      {
+        name = "TRANSACTION_PROCESSOR_WAKE_UP_URL"
+        value = format(
+          "http://mock-server.%s:8081/api/v1/mock/txn/wake",
+          aws_service_discovery_private_dns_namespace.processing.name
+        )
+      }
+    ]
+    secrets = [
+      {
+        name      = "SPRING_DATASOURCE_PASSWORD"
+        valueFrom = format("%s:password::", aws_secretsmanager_secret.rds_password.arn)
+      },
+      {
+        name      = "ACCOUNT_STORE_PASSWORD"
+        valueFrom = format("%s:password::", aws_secretsmanager_secret.account_password.arn)
+      },
+      {
+        name      = "RECOMMENDATION_STORE_PASSWORD"
+        valueFrom = format("%s:password::", aws_secretsmanager_secret.recommendation_password.arn)
+      }
+    ]
+    # The packaged contract is served after Spring finishes initializing.
+    healthCheck = {
+      command     = ["CMD", "curl", "--fail", "--silent", "http://localhost:8082/openapi.yaml"]
+      interval    = 30
+      timeout     = 5
+      retries     = 3
+      startPeriod = 60
+    }
+    logConfiguration = {
+      logDriver     = "awslogs"
+      secretOptions = []
+      options = {
+        "awslogs-group"         = aws_cloudwatch_log_group.pricing.name
+        "awslogs-region"        = var.aws_region
+        "awslogs-stream-prefix" = "engine"
+        "awslogs-create-group"  = "true"
+      }
+    }
+  }])
+}
+resource "aws_ecs_service" "engine" {
+  wait_for_steady_state              = true
+  name                               = "pricing-engine-service"
+  cluster                            = aws_ecs_cluster.pricing.id
+  task_definition                    = aws_ecs_task_definition.engine.arn
+  desired_count                      = var.engine_desired_count
+  launch_type                        = "FARGATE"
+  platform_version                   = "1.4.0"
+  deployment_minimum_healthy_percent = 100
+  deployment_maximum_percent         = 200
+  enable_ecs_managed_tags            = true
+  enable_execute_command             = false
+  propagate_tags                     = "NONE"
+  deployment_circuit_breaker {
+    enable   = true
+    rollback = true
+  }
+  network_configuration {
+    subnets          = [aws_subnet.public["a"].id]
+    security_groups  = [aws_security_group.engine.id]
+    assign_public_ip = true
+  }
+  service_registries {
+    registry_arn = aws_service_discovery_service.processing["engine"].arn
+  }
+  depends_on = [
+    aws_ecs_service.backend,
+    aws_ecs_service.mock_server,
+    aws_secretsmanager_secret_version.recommendation_password,
+    aws_iam_role_policy.execution_secret,
+    aws_iam_role_policy_attachment.execution_base
+  ]
 }

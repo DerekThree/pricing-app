@@ -2,6 +2,7 @@
 set -eu
 
 : "${ACCOUNT_PASSWORD:?ACCOUNT_PASSWORD is required}"
+: "${RECOMMENDATION_PASSWORD:?RECOMMENDATION_PASSWORD is required}"
 
 psql --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" --set=ON_ERROR_STOP=1 <<'SQL'
 \getenv account_password ACCOUNT_PASSWORD
@@ -12,5 +13,14 @@ SELECT format('GRANT accountuser TO %I', current_user)
 \gexec
 SELECT 'CREATE DATABASE accountdb OWNER accountuser'
 WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = 'accountdb')
+\gexec
+\getenv recommendation_password RECOMMENDATION_PASSWORD
+SELECT format('CREATE ROLE recommendationuser LOGIN PASSWORD %L', :'recommendation_password')
+WHERE NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'recommendationuser')
+\gexec
+SELECT format('GRANT recommendationuser TO %I', current_user)
+\gexec
+SELECT 'CREATE DATABASE recommendationdb OWNER recommendationuser'
+WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = 'recommendationdb')
 \gexec
 SQL

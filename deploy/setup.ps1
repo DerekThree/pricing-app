@@ -6,7 +6,7 @@ $AwsRegion = 'us-east-1'
 $Root = Split-Path -Parent $PSScriptRoot
 $Infra = Join-Path $PSScriptRoot 'aws'
 $Local = Join-Path $PSScriptRoot 'local'
-$RepoNames = @('pricing-backend', 'pricing-dashboard', 'pricing-mock-server')
+$RepoNames = @('pricing-backend', 'pricing-dashboard', 'pricing-mock-server', 'pricing-engine')
 $ServiceNames = @($RepoNames | ForEach-Object { "$_-service" })
 $Cluster = 'pricing-app-cluster'
 $Database = 'pricing-app-db'
@@ -209,9 +209,10 @@ function Build-LocalImages {
     Invoke-Native docker @('info') -Capture | Out-Null
     Copy-Repositories
     foreach ($name in $RepoNames) {
+        $buildContext = if ($name -eq 'pricing-engine') { $Root } else { Join-Path $Root $name }
         Invoke-Native docker @(
             'build', '--platform', 'linux/amd64', '-t', "$($name):latest",
-            (Join-Path $Root $name)
+            '-f', (Join-Path $Root "$name/Dockerfile"), $buildContext
         )
     }
 }
@@ -252,6 +253,7 @@ function Start-Local {
         $lines = @(
             "POSTGRES_PASSWORD=$(New-Password)"
             "ACCOUNT_PASSWORD=$(New-Password)"
+            "RECOMMENDATION_PASSWORD=$(New-Password)"
         )
         # CreateNew preserves an existing password even if another process creates the file.
         $stream = [IO.File]::Open($envPath, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write)
@@ -266,7 +268,7 @@ function Start-Local {
         Write-Host "Database credentials saved to $envPath"
     }
     $environment = Get-Content -LiteralPath $envPath
-    foreach ($key in @('POSTGRES_PASSWORD', 'ACCOUNT_PASSWORD')) {
+    foreach ($key in @('POSTGRES_PASSWORD', 'ACCOUNT_PASSWORD', 'RECOMMENDATION_PASSWORD')) {
         if (-not ($environment -match "^\s*$key\s*=\s*\S+")) {
             throw "$envPath must contain a nonempty $key."
         }
@@ -339,7 +341,7 @@ function Set-RdsAvailable {
 function Push-Images {
     $resources = @(Get-StateResources)
     $images = @()
-    foreach ($name in @('backend', 'dashboard', 'mock_server')) {
+    foreach ($name in @('backend', 'dashboard', 'mock_server', 'engine')) {
         $repository = Get-StateValue $resources 'aws_ecr_repository' $name
         if (-not $repository.repository_url) { throw "Missing ECR repository: $name." }
         $images += [pscustomobject]@{ Name = $repository.name; Url = $repository.repository_url }
@@ -386,7 +388,7 @@ function Initialize-AwsDatabase {
         throw "Database initialization failed: $($result.tasks[0].stoppedReason). " +
             "Exit code: $($container.exitCode). Check the database-init CloudWatch log."
     }
-    Write-Host 'Account database initialized.'
+    Write-Host 'Account and recommendation databases initialized.'
 }
 
 function Wait-Services {
@@ -401,7 +403,7 @@ function Wait-Services {
             if (-not $busy.Count) { return }
         } elseif ($status.Running) {
             $resources = @(Get-StateResources)
-            foreach ($name in @('backend', 'dashboard', 'mock_server')) {
+            foreach ($name in @('backend', 'dashboard', 'mock_server', 'engine')) {
                 $expected = Get-StateValue $resources 'aws_ecs_service' $name
                 $actual = $status.Services | Where-Object {
                     $_.serviceName -eq $expected.name
@@ -443,13 +445,17 @@ function Invoke-AwsOperation {
         return
     }
     $savedEnvironment = @{}
-    foreach ($key in @('TF_VAR_aws_region', 'TF_VAR_rds_password', 'TF_VAR_account_password')) {
+    foreach ($key in @(
+        'TF_VAR_aws_region', 'TF_VAR_rds_password',
+        'TF_VAR_account_password', 'TF_VAR_recommendation_password'
+    )) {
         $savedEnvironment[$key] = [Environment]::GetEnvironmentVariable($key, 'Process')
     }
     try {
         $env:TF_VAR_aws_region = $AwsRegion
         $env:TF_VAR_rds_password = $null
         $env:TF_VAR_account_password = $null
+        $env:TF_VAR_recommendation_password = $null
         if ($Operation -eq 'Start' -and $status.Database -eq 'absent') {
             $env:TF_VAR_rds_password = New-Password
         }
@@ -457,6 +463,11 @@ function Invoke-AwsOperation {
             Get-StateValue $resources 'aws_secretsmanager_secret_version' 'account_password'
         )) {
             $env:TF_VAR_account_password = New-Password
+        }
+        if ($Operation -ne 'Destroy' -and -not (
+            Get-StateValue $resources 'aws_secretsmanager_secret_version' 'recommendation_password'
+        )) {
+            $env:TF_VAR_recommendation_password = New-Password
         }
         switch ($Operation) {
             'Start' {
@@ -469,11 +480,12 @@ function Invoke-AwsOperation {
                     '-target=aws_db_instance.pricing', '-target=aws_security_group.database',
                     '-target=aws_ecr_repository.backend', '-target=aws_ecr_repository.dashboard',
                     '-target=aws_ecr_repository.mock_server', '-target=aws_ecs_cluster.pricing',
+                    '-target=aws_ecr_repository.engine',
                     '-target=aws_ecs_task_definition.database_init'
                 )
                 Push-Images
                 Initialize-AwsDatabase
-                Write-Host 'Create the ALB and start all three ECS services.'
+                Write-Host 'Create the ALB and start all four ECS services.'
                 Invoke-Terraform @(
                     'apply', '-var-file=started.tfvars', '-var=import_existing=false'
                 )

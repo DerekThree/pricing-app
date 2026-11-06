@@ -2,6 +2,8 @@
 
 - When making changes to this project's server, always check for analogous features already implemented in its other servers and follow the established conventions. This includes naming conventions, folder structure, architecture, and anything else you can think of. The more similar these servers are to each other the better. Any convention that you can find is of value and should be used when implementing new features. When implementing a feature, first look for analogous feature already existing in the same or another server in this project and follow its convention.
 
+- Avoid the `pricing` prefix in this pricing project unless an existing convention justifies it.
+
 ## Sources of truth
 
 - Domain and decisions: `docs/agents/domain.md` and `docs/ADR/`. 
