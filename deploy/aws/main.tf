@@ -247,6 +247,18 @@ resource "aws_secretsmanager_secret_version" "rds_password" {
     ignore_changes = [secret_string]
   }
 }
+data "aws_secretsmanager_secret" "pricingdb_engine_password" {
+  name = "pricing-app/pricingdb-engine-password"
+}
+data "aws_secretsmanager_secret" "accountdb_engine_password" { 
+  name = "pricing-app/accountdb-engine-password" 
+}
+data "aws_secretsmanager_secret" "recommendationdb_engine_password" { 
+  name = "pricing-app/recommendationdb-engine-password" 
+}
+data "aws_secretsmanager_secret" "recommendationdb_txn_processor_password" { 
+  name = "pricing-app/recommendationdb-txn-processor-password" 
+}
 resource "aws_db_instance" "pricing" {
   identifier                   = local.database_identifier
   db_name                      = "pricingdb"

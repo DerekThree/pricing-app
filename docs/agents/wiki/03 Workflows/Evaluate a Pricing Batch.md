@@ -46,17 +46,34 @@ The Pricing Engine collects distinct Pricing Dates and asks `PriceConfigReposito
 If configuration access fails, evaluation throws `PricingAccessException`. Temporary database
 failures retry the failed operation with bounded attempts and delay. Configuration access retries
 finish before calculation begins; storage retries keep the completed result unchanged and do not
-reload configuration. The current batch keeps its turn during delays. Startup recovery runs after
+reload configuration. The affected worker retains its slot during delays. Startup recovery runs after
 singleton initialization and completes before the HTTP listener accepts wake-up calls.
 Expected account and Fee Request validation outcomes do not trigger infrastructure retries.
 
 Recommendation writes and their outbox row remain one local transaction on every attempt. After
 successful persistence, downstream notification starts before source completion. Retry exhaustion
-pauses the active worker with unfinished input unprocessed and no durable failed state. It checks
-the unavailable store's connectivity periodically and ignores wake-ups without storing or queuing
-them. Once access returns, it stores retained results unchanged and finishes any known pending
-source completion before a fresh Account Outbox scan. Normal serial processing and subsequent
-scans resume, and connectivity checks stop. Healthy idle processing does not poll.
+pauses the affected worker with unfinished input unprocessed and no durable failed state. By
+default it checks the unavailable store's connectivity every five seconds, without scanning
+outboxes. The worker retains its calculated result, slot, and Account claim transaction while
+that transaction remains usable. Once access returns, it stores the retained result unchanged,
+finishes source completion, and releases its slot. Other workers continue within the instance cap
+while the Account Store supports discovery and claiming. Wake-ups at capacity are ignored.
+After recommendations commit, retain only the pending Account completion and worker slot. Retry
+the completion update in an Account Store transaction, using a new transaction if the original
+claim was lost. This requires no reclaim, recalculation, or resubmission of recommendations.
+Connectivity checks stop after recovery. Healthy idle processing does not poll.
+
+Unexpected non-temporary evaluation exceptions are logged and stored as JSON with `type`,
+nullable `message`, and `stackTrace` in Account Outbox `error`. The worker commits its held
+Account claim transaction with `processed = false`, then releases its claim and slot and triggers
+discovery. Other workers continue. The error excludes the batch across restarts; manually clearing
+it to SQL `NULL` restores eligibility on startup, wake-up, or completion-triggered discovery.
+If the Account Store prevents saving an error, retain the exception and worker slot through bounded
+retries and connectivity recovery. Save through the original claim while valid; after transaction
+loss, reclaim only the same eligible batch. Discard the error if the batch is owned elsewhere or
+no longer eligible. If recommendations already committed, recover source completion instead,
+without recalculating or resubmitting recommendations. Every terminal outcome releases capacity
+and triggers discovery; independent workers continue within the cap.
 
 ## 3. Resolve each account
 

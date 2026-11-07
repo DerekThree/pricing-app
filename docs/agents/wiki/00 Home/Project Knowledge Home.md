@@ -44,24 +44,35 @@ flowchart TB
 ```
 
 The Backend synchronous batch endpoint and its engine-dependent wiring have been removed.
-On startup or an HTTP wake-up, the engine discovers pending account batches in the Account Store
-and drains discovered sets serially until none remain. It commits relational recommendations and
-one outbox row in the Recommendation Store,
-then marks the Account Outbox record processed in a separate local transaction.
+On startup or an HTTP wake-up, each engine instance discovers eligible Account Outbox rows and
+admits workers up to `ENGINE_MAX_WORKERS` (default `3`). Discovery requires `processed = false`
+and SQL `error IS NULL`; even an empty error string excludes a row. `FOR UPDATE SKIP LOCKED`
+allows multiple instances to claim different batches. Each worker keeps its Account Store
+transaction and row lock open through calculation and the separate local Recommendation Store
+commit, then marks its Account Outbox row processed and commits the Account transaction.
+Every finishing worker releases its slot and triggers discovery. Admission and overlapping
+completion/wake-up discovery are coordinated; wake-ups at capacity are ignored.
 After each recommendation commit, the engine sends a payload-free Transaction Processor wake-up
 on a virtual thread. Bounded in-memory retries and startup checks of `processed=false` rows follow
 the Account Store convention; HTTP delivery leaves the outbox unchanged.
 Startup recovery runs synchronously after singleton initialization and finishes before the HTTP
 listener accepts wake-up calls.
-Temporary database failures receive bounded operation retries while the current batch keeps its
-turn. After exhaustion, the active worker pauses and periodically checks the unavailable store;
-wake-ups are ignored without storage or queuing. Recovery stores retained results unchanged and
-finishes any known pending source completion before a fresh Account Outbox scan. Serial processing
-and subsequent scans resume; connectivity checks stop and healthy idle processing does not poll.
+Temporary database failures receive bounded operation retries. A retrying or recovering worker
+keeps its slot and pending result/completion state. After exhaustion it periodically checks the
+unavailable store; other workers may continue within the instance cap. Recovery stores retained
+results unchanged and finishes known pending source completion without recalculation. Connectivity
+checks stop after recovery, and healthy idle processing does not poll.
 Before evaluation, existing Recommendation Outbox rows identify committed output and allow repair
 of the Account Outbox processed flag. Storage retries recognize duplicate batch primary-key errors
 without another outbox lookup. Recovery preserves output and Recommendation Outbox state; a restart
 reevaluates durable input only when its output never committed.
+Unexpected non-temporary evaluation exceptions are logged and persisted in Account Outbox `error`,
+leaving the batch unprocessed and excluded across restarts. The worker releases its claim and slot
+and triggers discovery; other workers continue. Clearing `error` to SQL `NULL` restores eligibility
+on startup, wake-up, or completion. See the evaluation workflow for structured error details.
+Unsaved errors retain their worker slot through Account Store recovery. Workers reuse valid claims
+or reclaim the same eligible batch after transaction loss, discard errors for competing owners or
+ineligible batches, and recover source completion when recommendations already committed.
 
 See [[05 Reference/Current and Planned System]] for implemented and planned behavior.
 
@@ -70,7 +81,7 @@ See [[05 Reference/Current and Planned System]] for implemented and planned beha
 | Location | Responsibility |
 |---|---|
 | `pricing-backend/` | Configuration API, JPA persistence, Flyway migrations, OpenAPI contract, backend tests |
-| `pricing-engine/` | Wake-up API, serial batch draining, evaluator, configuration snapshot reads |
+| `pricing-engine/` | Wake-up API, capped parallel workers, transactional claims, evaluator, configuration snapshot reads |
 | `pricing-dashboard/` | React Router SPA, screens and forms, generated TypeScript client, Playwright tests |
 | `docs/ADR/` | Accepted architectural and domain decisions |
 | `docs/Validations.md` | Cross-layer validation ownership and expected errors |

@@ -74,11 +74,15 @@ Use **Pricing Batch**, not “batch job” or “simulator run.”
 
 The upstream database holding account records supplied by the Mock Account Processor and their
 Account Outbox processing state.
+Account records cannot change or be removed after insertion. Outbox records remain present and
+retain their batch identity while permitting processing-state changes.
 
 ### Recommendation Store
 
 The downstream database holding transaction recommendation records produced by the Pricing Engine
 and their Recommendation Outbox processing state.
+Recommendation records cannot change or be removed after insertion. Outbox records remain present
+and retain their batch identity while permitting processing-state changes.
 
 ### Pricing Engine
 

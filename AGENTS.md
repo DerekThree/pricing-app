@@ -11,6 +11,10 @@
 - Issues and specs: `docs/agents/issue-tracker.md`.
 - Contracts, code, migrations, tests, domain context, ADRs, `docs/Validations.md`, and source tickets remain authoritative for their own facts.
 
+## Testing
+
+- Use H2 for tests unless Testcontainers are needed.
+
 ## Maven
 
 - Run Maven with `sandbox_permissions: "require_escalated"` on the first attempt because dependency resolution and Maven cache access are blocked in the sandbox. The elevation authorizes only Maven network/cache access; it does not authorize source-file edits.
