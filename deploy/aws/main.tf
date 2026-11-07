@@ -1,7 +1,7 @@
 # Pricing App: reconciled with read-only AWS inventory, 2026-09-29.
 # Use deploy/setup.ps1 for ordered lifecycle operations; imports require explicit opt-in.
 terraform {
-  required_version = ">= 1.7.0"
+  required_version = ">= 1.11.0"
 
   backend "s3" {
     bucket       = "pricing-app-tfstate"
@@ -12,7 +12,8 @@ terraform {
   }
 
   required_providers {
-    aws = { source = "hashicorp/aws", version = "~> 6.0" }
+    aws    = { source = "hashicorp/aws", version = "~> 6.0" }
+    random = { source = "hashicorp/random", version = "~> 3.7" }
   }
 }
 provider "aws" { region = var.aws_region }
@@ -26,28 +27,10 @@ variable "import_existing" {
   type        = bool
   default     = false
 }
-variable "rds_password" {
-  description = "Database password supplied only during initial creation."
-  type        = string
-  sensitive   = true
-  default     = null
-}
 variable "allowed_http_cidr" {
   description = "Existing ALB HTTP allowlist; do not widen without explicit authorization."
   type        = string
   default     = "130.105.47.225/32"
-}
-variable "account_password" {
-  description = "Account database password supplied only during initial creation."
-  type        = string
-  sensitive   = true
-  default     = null
-}
-variable "recommendation_password" {
-  description = "Recommendation database password supplied only during initial creation."
-  type        = string
-  sensitive   = true
-  default     = null
 }
 variable "mock_server_desired_count" {
   type    = number
@@ -234,36 +217,63 @@ resource "aws_db_subnet_group" "pricing" {
   description = "Pricing App RDS subnet group"
   subnet_ids  = [aws_subnet.private["a"].id, aws_subnet.private["b"].id]
 }
-# Imported databases keep their existing password and secret version.
-resource "aws_secretsmanager_secret" "rds_password" {
-  name                    = "pricing-app/rds-password"
+ephemeral "random_password" "database" {
+  for_each = toset([
+    "account", "recommendation", "pricingdb_engine", "accountdb_engine",
+    "recommendationdb_engine", "recommendationdb_txn_processor"
+  ])
+  length  = 32
+  special = false
+}
+resource "aws_secretsmanager_secret" "pricingdb_engine_password" {
+  name                    = "pricing-app/pricingdb-engine-password"
   recovery_window_in_days = 0
 }
-resource "aws_secretsmanager_secret_version" "rds_password" {
-  count         = 1
-  secret_id     = aws_secretsmanager_secret.rds_password.id
-  secret_string = jsonencode({ password = var.rds_password })
-  lifecycle {
-    ignore_changes = [secret_string]
-  }
+resource "aws_secretsmanager_secret_version" "pricingdb_engine_password" {
+  secret_id = aws_secretsmanager_secret.pricingdb_engine_password.id
+  secret_string_wo = jsonencode({
+    password = ephemeral.random_password.database["pricingdb_engine"].result
+  })
+  secret_string_wo_version = 1
 }
-data "aws_secretsmanager_secret" "pricingdb_engine_password" {
-  name = "pricing-app/pricingdb-engine-password"
+resource "aws_secretsmanager_secret" "accountdb_engine_password" {
+  name                    = "pricing-app/accountdb-engine-password"
+  recovery_window_in_days = 0
 }
-data "aws_secretsmanager_secret" "accountdb_engine_password" { 
-  name = "pricing-app/accountdb-engine-password" 
+resource "aws_secretsmanager_secret_version" "accountdb_engine_password" {
+  secret_id = aws_secretsmanager_secret.accountdb_engine_password.id
+  secret_string_wo = jsonencode({
+    password = ephemeral.random_password.database["accountdb_engine"].result
+  })
+  secret_string_wo_version = 1
 }
-data "aws_secretsmanager_secret" "recommendationdb_engine_password" { 
-  name = "pricing-app/recommendationdb-engine-password" 
+resource "aws_secretsmanager_secret" "recommendationdb_engine_password" {
+  name                    = "pricing-app/recommendationdb-engine-password"
+  recovery_window_in_days = 0
 }
-data "aws_secretsmanager_secret" "recommendationdb_txn_processor_password" { 
-  name = "pricing-app/recommendationdb-txn-processor-password" 
+resource "aws_secretsmanager_secret_version" "recommendationdb_engine_password" {
+  secret_id = aws_secretsmanager_secret.recommendationdb_engine_password.id
+  secret_string_wo = jsonencode({
+    password = ephemeral.random_password.database["recommendationdb_engine"].result
+  })
+  secret_string_wo_version = 1
+}
+resource "aws_secretsmanager_secret" "recommendationdb_txn_processor_password" {
+  name                    = "pricing-app/recommendationdb-txn-processor-password"
+  recovery_window_in_days = 0
+}
+resource "aws_secretsmanager_secret_version" "recommendationdb_txn_processor_password" {
+  secret_id = aws_secretsmanager_secret.recommendationdb_txn_processor_password.id
+  secret_string_wo = jsonencode({
+    password = ephemeral.random_password.database["recommendationdb_txn_processor"].result
+  })
+  secret_string_wo_version = 1
 }
 resource "aws_db_instance" "pricing" {
   identifier                   = local.database_identifier
   db_name                      = "pricingdb"
   username                     = "pricinguser"
-  password                     = var.rds_password
+  manage_master_user_password  = true
   engine                       = "postgres"
   engine_version               = "18.3"
   instance_class               = "db.t4g.micro"
@@ -287,10 +297,6 @@ resource "aws_db_instance" "pricing" {
   copy_tags_to_snapshot        = true
   deletion_protection          = false
   skip_final_snapshot          = true
-  lifecycle {
-    ignore_changes = [password]
-  }
-  depends_on = [aws_secretsmanager_secret_version.rds_password]
 }
 resource "aws_rds_instance_state" "pricing" {
   # Independent so a targeted start cannot modify a stopped database first.
@@ -341,9 +347,13 @@ resource "aws_iam_role_policy" "execution_secret" {
       Effect = "Allow"
       Action = "secretsmanager:GetSecretValue"
       Resource = [
-        aws_secretsmanager_secret.rds_password.arn,
+        aws_db_instance.pricing.master_user_secret[0].secret_arn,
         aws_secretsmanager_secret.account_password.arn,
-        aws_secretsmanager_secret.recommendation_password.arn
+        aws_secretsmanager_secret.recommendation_password.arn,
+        aws_secretsmanager_secret.pricingdb_engine_password.arn,
+        aws_secretsmanager_secret.accountdb_engine_password.arn,
+        aws_secretsmanager_secret.recommendationdb_engine_password.arn,
+        aws_secretsmanager_secret.recommendationdb_txn_processor_password.arn
       ]
     }]
   })
@@ -458,7 +468,7 @@ resource "aws_ecs_task_definition" "backend" {
     ]
     secrets = [{
       name      = "SPRING_DATASOURCE_PASSWORD"
-      valueFrom = format("%s:password::", aws_secretsmanager_secret.rds_password.arn)
+      valueFrom = format("%s:password::", aws_db_instance.pricing.master_user_secret[0].secret_arn)
     }]
     healthCheck = {
       command     = ["CMD", "curl", "--fail", "--silent", "http://localhost:8080/actuator/health"]
@@ -607,24 +617,24 @@ resource "aws_secretsmanager_secret" "account_password" {
   recovery_window_in_days = 0
 }
 resource "aws_secretsmanager_secret_version" "account_password" {
-  count         = 1
-  secret_id     = aws_secretsmanager_secret.account_password.id
-  secret_string = jsonencode({ password = var.account_password })
-  lifecycle {
-    ignore_changes = [secret_string]
-  }
+  count     = 1
+  secret_id = aws_secretsmanager_secret.account_password.id
+  secret_string_wo = jsonencode({
+    password = ephemeral.random_password.database["account"].result
+  })
+  secret_string_wo_version = 1
 }
 resource "aws_secretsmanager_secret" "recommendation_password" {
   name                    = "pricing-app/recommendation-password"
   recovery_window_in_days = 0
 }
 resource "aws_secretsmanager_secret_version" "recommendation_password" {
-  count         = 1
-  secret_id     = aws_secretsmanager_secret.recommendation_password.id
-  secret_string = jsonencode({ password = var.recommendation_password })
-  lifecycle {
-    ignore_changes = [secret_string]
-  }
+  count     = 1
+  secret_id = aws_secretsmanager_secret.recommendation_password.id
+  secret_string_wo = jsonencode({
+    password = ephemeral.random_password.database["recommendation"].result
+  })
+  secret_string_wo_version = 1
 }
 resource "aws_ecr_repository" "mock_server" {
   name                 = "pricing-mock-server"
@@ -656,7 +666,7 @@ resource "aws_ecs_task_definition" "database_init" {
     secrets = [
       {
         name      = "PGPASSWORD"
-        valueFrom = format("%s:password::", aws_secretsmanager_secret.rds_password.arn)
+        valueFrom = format("%s:password::", aws_db_instance.pricing.master_user_secret[0].secret_arn)
       },
       {
         name      = "ACCOUNT_PASSWORD"
@@ -951,7 +961,7 @@ resource "aws_ecs_task_definition" "engine" {
     secrets = [
       {
         name      = "SPRING_DATASOURCE_PASSWORD"
-        valueFrom = format("%s:password::", aws_secretsmanager_secret.rds_password.arn)
+        valueFrom = format("%s:password::", aws_db_instance.pricing.master_user_secret[0].secret_arn)
       },
       {
         name      = "ACCOUNT_STORE_PASSWORD"
@@ -960,6 +970,26 @@ resource "aws_ecs_task_definition" "engine" {
       {
         name      = "RECOMMENDATION_STORE_PASSWORD"
         valueFrom = format("%s:password::", aws_secretsmanager_secret.recommendation_password.arn)
+      },
+      {
+        name      = "PRICINGDB_ENGINE_PASSWORD"
+        valueFrom = format("%s:password::", aws_secretsmanager_secret.pricingdb_engine_password.arn)
+      },
+      {
+        name      = "ACCOUNTDB_ENGINE_PASSWORD"
+        valueFrom = format("%s:password::", aws_secretsmanager_secret.accountdb_engine_password.arn)
+      },
+      {
+        name = "RECOMMENDATIONDB_ENGINE_PASSWORD"
+        valueFrom = format(
+          "%s:password::", aws_secretsmanager_secret.recommendationdb_engine_password.arn
+        )
+      },
+      {
+        name = "RECOMMENDATIONDB_TXN_PROCESSOR_PASSWORD"
+        valueFrom = format(
+          "%s:password::", aws_secretsmanager_secret.recommendationdb_txn_processor_password.arn
+        )
       }
     ]
     # The packaged contract is served after Spring finishes initializing.
@@ -1011,6 +1041,10 @@ resource "aws_ecs_service" "engine" {
     aws_ecs_service.backend,
     aws_ecs_service.mock_server,
     aws_secretsmanager_secret_version.recommendation_password,
+    aws_secretsmanager_secret_version.pricingdb_engine_password,
+    aws_secretsmanager_secret_version.accountdb_engine_password,
+    aws_secretsmanager_secret_version.recommendationdb_engine_password,
+    aws_secretsmanager_secret_version.recommendationdb_txn_processor_password,
     aws_iam_role_policy.execution_secret,
     aws_iam_role_policy_attachment.execution_base
   ]

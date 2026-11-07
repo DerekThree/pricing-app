@@ -41,7 +41,7 @@ recommendations switch recovery to source completion without recalculation or re
 | Pricing Engine | Standalone evaluator; capped parallel workers across multiple instances | No global FIFO order |
 | Configuration loading | Candidate Pricing Plans filtered by submitted Pricing Dates in PostgreSQL; remaining evaluation in Java | Evaluation boundary accepted by ADR 0004 |
 | Pricing Batch storage | Mock Account Processor persists account records and Account Outbox in PostgreSQL | Engine reads accepted accounts with their individual Pricing Dates |
-| Batch trigger | Startup recovery completes before the HTTP listener accepts payload-free `POST /api/v1/work-available`; empty HTTP 202 | No queued wake-ups or healthy idle polling |
+| Batch trigger | Database initialization gates HTTP readiness; startup recovery runs in the background; payload-free `POST /api/v1/work-available` returns empty HTTP 202 | No queued wake-ups or healthy idle polling |
 | Pricing Decisions | Relational recommendations and one outbox row; post-commit HTTP wake-ups | Transaction Processor consumes persisted output |
 | Outbox and recovery | Transactional Account claims with skip-locked discovery; atomic recommendation/outbox persistence; source completion after output commit; worker-local result, completion, and unsaved-error recovery; uniqueness preserves committed output | ADR 0008 recovery implemented |
 | Transaction Processor | Not implemented | Mock external consumer of persisted recommendations |

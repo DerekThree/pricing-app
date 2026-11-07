@@ -14,7 +14,7 @@ This ownership follows the Engine's existing connections to all three stores; th
 | Mock Server restricted login | `accountdb` | INSERT and SELECT on Account Store tables; required sequence access |
 | `pricingdb_engine` | `pricingdb` | SELECT on the 15 business tables |
 | `accountdb_engine` | `accountdb` | SELECT on `accounts`, `account_attributes`, `fee_requests`, `batch_outbox`; UPDATE on `batch_outbox` |
-| `recommendationdb_engine` | `recommendationdb` | INSERT on recommendation tables; SELECT on `recommendation_outbox` |
+| `recommendationdb_engine` | `recommendationdb` | INSERT and SELECT on all Recommendation Store tables; required sequence access |
 | `recommendationdb_txn_processor` | `recommendationdb` | SELECT on `recommendation_outbox`, `account_recommendations`, `fee_request_recommendations`, `recommendation_eligibility_reasons`; UPDATE on `recommendation_outbox` |
 
 Backend and Mock Server runtime logins do not own schemas or run migrations.

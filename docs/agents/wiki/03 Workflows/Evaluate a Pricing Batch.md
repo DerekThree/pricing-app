@@ -46,8 +46,10 @@ The Pricing Engine collects distinct Pricing Dates and asks `PriceConfigReposito
 If configuration access fails, evaluation throws `PricingAccessException`. Temporary database
 failures retry the failed operation with bounded attempts and delay. Configuration access retries
 finish before calculation begins; storage retries keep the completed result unchanged and do not
-reload configuration. The affected worker retains its slot during delays. Startup recovery runs after
-singleton initialization and completes before the HTTP listener accepts wake-up calls.
+reload configuration. The affected worker retains its slot during delays. Startup recovery runs on
+a virtual thread after singleton initialization, checking recommendations before account draining.
+HTTP readiness at `/openapi.yaml` requires successful initialization of all three databases;
+pending processing and unavailable downstream services do not block it.
 Expected account and Fee Request validation outcomes do not trigger infrastructure retries.
 
 Recommendation writes and their outbox row remain one local transaction on every attempt. After

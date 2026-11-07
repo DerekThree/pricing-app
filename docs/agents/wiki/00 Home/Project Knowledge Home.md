@@ -32,14 +32,16 @@ This vault explains the implemented Pricing application for agents making featur
 
 ## Fast mental model
 
-The Backend owns Pricing Configuration CRUD and schema migrations. The evaluator and configuration
-snapshot loader now belong to the standalone `pricing-engine/` Spring Boot server.
+The Backend owns Pricing Configuration CRUD. The standalone `pricing-engine/` Spring Boot server
+owns configuration, Account Store, and Recommendation Store initialization, migrations, evaluation, and
+configuration snapshots.
 
 ```mermaid
 flowchart TB
     Admin[Administrator] --> Dashboard[React dashboard]
     Dashboard -->|configuration HTTP JSON| Backend[Spring Boot backend]
-    Backend -->|JPA and Flyway| PostgreSQL[(PostgreSQL)]
+    Backend -->|JPA| PostgreSQL[(PostgreSQL)]
+    Engine -->|All three stores' Flyway initialization| PostgreSQL
     Engine[Standalone Pricing Engine] -->|loads Pricing Configuration| PostgreSQL
 ```
 
@@ -55,8 +57,9 @@ completion/wake-up discovery are coordinated; wake-ups at capacity are ignored.
 After each recommendation commit, the engine sends a payload-free Transaction Processor wake-up
 on a virtual thread. Bounded in-memory retries and startup checks of `processed=false` rows follow
 the Account Store convention; HTTP delivery leaves the outbox unchanged.
-Startup recovery runs synchronously after singleton initialization and finishes before the HTTP
-listener accepts wake-up calls.
+Database/login creation, Flyway migrations, and grants for all three stores finish before HTTP
+readiness at `/openapi.yaml`. Startup recovery runs on a virtual thread, checking recommendations
+before account draining. Pending processing and unavailable downstream services do not block readiness.
 Temporary database failures receive bounded operation retries. A retrying or recovering worker
 keeps its slot and pending result/completion state. After exhaustion it periodically checks the
 unavailable store; other workers may continue within the instance cap. Recovery stores retained
@@ -80,8 +83,8 @@ See [[05 Reference/Current and Planned System]] for implemented and planned beha
 
 | Location | Responsibility |
 |---|---|
-| `pricing-backend/` | Configuration API, JPA persistence, Flyway migrations, OpenAPI contract, backend tests |
-| `pricing-engine/` | Wake-up API, capped parallel workers, transactional claims, evaluator, configuration snapshot reads |
+| `pricing-backend/` | Configuration API, JPA persistence, OpenAPI contract, backend tests |
+| `pricing-engine/` | All three stores' initialization and migrations, wake-up API, capped parallel workers, transactional claims, evaluator, configuration snapshot reads |
 | `pricing-dashboard/` | React Router SPA, screens and forms, generated TypeScript client, Playwright tests |
 | `docs/ADR/` | Accepted architectural and domain decisions |
 | `docs/Validations.md` | Cross-layer validation ownership and expected errors |

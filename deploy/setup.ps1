@@ -445,35 +445,21 @@ function Invoke-AwsOperation {
         return
     }
     $savedEnvironment = @{}
-    foreach ($key in @(
-        'TF_VAR_aws_region', 'TF_VAR_rds_password',
-        'TF_VAR_account_password', 'TF_VAR_recommendation_password'
-    )) {
+    foreach ($key in @('TF_VAR_aws_region')) {
         $savedEnvironment[$key] = [Environment]::GetEnvironmentVariable($key, 'Process')
     }
     try {
         $env:TF_VAR_aws_region = $AwsRegion
-        $env:TF_VAR_rds_password = $null
-        $env:TF_VAR_account_password = $null
-        $env:TF_VAR_recommendation_password = $null
-        if ($Operation -eq 'Start' -and $status.Database -eq 'absent') {
-            $env:TF_VAR_rds_password = New-Password
-        }
-        if ($Operation -ne 'Destroy' -and -not (
-            Get-StateValue $resources 'aws_secretsmanager_secret_version' 'account_password'
-        )) {
-            $env:TF_VAR_account_password = New-Password
-        }
-        if ($Operation -ne 'Destroy' -and -not (
-            Get-StateValue $resources 'aws_secretsmanager_secret_version' 'recommendation_password'
-        )) {
-            $env:TF_VAR_recommendation_password = New-Password
-        }
         switch ($Operation) {
             'Start' {
                 if ($status.Database -ne 'absent') {
                     Set-RdsAvailable $status
                 }
+                Write-Host 'Prepare RDS and its managed master secret before credential consumers.'
+                Invoke-Terraform @(
+                    'apply', '-var=rds_state=available', '-var=import_existing=false',
+                    '-target=aws_db_instance.pricing'
+                )
                 Write-Host 'Prepare RDS, image repositories, and the database initialization task.'
                 Invoke-Terraform @(
                     'apply', '-var=rds_state=available', '-var=import_existing=false',

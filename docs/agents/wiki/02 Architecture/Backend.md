@@ -39,7 +39,34 @@ Use an existing neighboring package as the implementation pattern. Pricing Plans
 
 ## Persistence model
 
-Flyway migrations under [db/migration](../../../../pricing-backend/src/main/resources/db/migration/) are shared by H2-compatible tests and PostgreSQL. PostgreSQL-only constraints live under [db/postgresql](../../../../pricing-backend/src/main/resources/db/postgresql/). Runtime Hibernate uses `ddl-auto=validate`.
+The Engine owns configuration-store initialization and Flyway execution. Migrations under
+[db/migration](../../../../pricing-engine/src/main/resources/db/migration/) are shared by
+H2-compatible tests and PostgreSQL. PostgreSQL-only constraints and runtime grants live under
+[db/postgresql](../../../../pricing-engine/src/main/resources/db/postgresql/).
+Backend production Flyway is disabled; its tests load the Engine's versioned migrations.
+Runtime Hibernate uses `ddl-auto=validate`.
+
+The Engine connects to an existing PostgreSQL database through `INITIALIZATION_URL`, using
+`INITIALIZATION_USERNAME` and `INITIALIZATION_PASSWORD`, to create the configuration and Account
+Store databases and runtime logins outside a transaction. The same privileged login runs
+configuration, Account Store, and Recommendation Store migrations. Runtime datasource credentials
+remain separate.
+`CONFIGURATION_STORE_BACKEND_USERNAME` and `CONFIGURATION_STORE_BACKEND_PASSWORD` configure the
+Backend login to provision; Backend uses matching `SPRING_DATASOURCE_USERNAME` and
+`SPRING_DATASOURCE_PASSWORD`. Backend defaults to `pricingdb_backend` with configuration CRUD
+and sequence access; Engine defaults to `pricingdb_engine` with SELECT on the 15 business tables.
+Neither runtime login owns the schema or can run migrations.
+
+Account Store migrations live in the Engine's `db/account/`, with runtime grants in
+`db/account-postgresql/`. Mock Server production Flyway is disabled; its PostgreSQL tests load
+these Engine resources using a privileged connection before starting the restricted application.
+H2 tests retain their separate SQL schema initialization.
+`ACCOUNT_STORE_MOCK_SERVER_USERNAME` and `ACCOUNT_STORE_MOCK_SERVER_PASSWORD` configure the login
+to provision for Mock Server, which uses matching `SPRING_DATASOURCE_USERNAME` and
+`SPRING_DATASOURCE_PASSWORD`. The default login is `accountdb_mock_server`, with INSERT and SELECT
+on the four Account Store tables and sequence access. The Engine uses `ACCOUNT_STORE_USERNAME`
+and `ACCOUNT_STORE_PASSWORD`, defaulting to `accountdb_engine`, with SELECT on those tables and
+table-wide UPDATE on `batch_outbox`. Neither runtime login owns the schema or can run migrations.
 
 Important database-enforced relationships include:
 
@@ -57,7 +84,10 @@ The current schema is defined by migrations. The root `DB Schema.txt` is histori
 ## Pricing Engine boundary
 
 The standalone `pricing-engine/` server owns evaluation and configuration snapshot reads. Backend
-configuration CRUD and configuration-schema migrations remain here. The synchronous batch endpoint, its contract operation, and engine-dependent wiring have been removed. The engine independently reads accounts and persists transaction recommendations using JPA repositories and separate local store transactions.
+configuration CRUD remains here; configuration-schema migrations belong to the Engine.
+The synchronous batch endpoint, its contract operation, and engine-dependent wiring have been
+removed. The engine independently reads accounts and persists transaction recommendations using
+JPA repositories and separate local store transactions.
 
 The engine owns transport- and JPA-independent records:
 

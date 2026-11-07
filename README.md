@@ -30,8 +30,13 @@ There are three ways to run the app
 
 ### Local without Docker
 
-Requires **Java 21**, **Node.js/npm**, and **PostgreSQL** on port 5432. Create
-`pricingdb` owned by `pricinguser` and `accountdb` owned by `accountuser`, with separate passwords.
+Requires **Java 21**, **Node.js/npm**, and **PostgreSQL** on port 5432. Start the Engine first to
+initialize `pricingdb` and `accountdb`. Its shared `INITIALIZATION_URL` points to an existing
+database; `INITIALIZATION_USERNAME` and `INITIALIZATION_PASSWORD` provide the privileged login
+for database/login creation, Flyway migrations, and grants. Runtime logins are separate.
+The Engine provisions Mock Server's login using `ACCOUNT_STORE_MOCK_SERVER_USERNAME`
+(default `accountdb_mock_server`) and `ACCOUNT_STORE_MOCK_SERVER_PASSWORD`; Mock Server uses
+the matching datasource credentials below.
 
 **Terminal 1 — Dashboard**
 
@@ -56,7 +61,7 @@ $env:SPRING_DATASOURCE_PASSWORD = Read-Host 'Pricing database password'
 ```powershell
 cd .\pricing-mock-server
 $env:SPRING_DATASOURCE_URL = 'jdbc:postgresql://localhost:5432/accountdb'
-$env:SPRING_DATASOURCE_USERNAME = 'accountuser'
+$env:SPRING_DATASOURCE_USERNAME = 'accountdb_mock_server'
 $env:SPRING_DATASOURCE_PASSWORD = Read-Host 'Account database password'
 .\mvnw.cmd spring-boot:run
 ```
@@ -96,7 +101,9 @@ The Dashboard uses browser-visible runtime `BACKEND_API_URL=http://localhost:808
 `ACCOUNT_PROCESSOR_API_URL=http://localhost:8081` settings.
 
 PostgreSQL creates `pricingdb`/`pricinguser`. `deploy/local/init-db.sh` creates
-`accountdb`/`accountuser` in the same container. Each application runs its own Flyway migrations.
+`accountdb`/`accountuser` in the same container. The Engine owns configuration and Account Store
+Flyway migrations; Backend and Mock Server production Flyway are disabled. Local provisioning
+and startup ordering changes are tracked in ticket 06 of `.scratch/aws-postgresql-automation/`.
 The initialization script runs automatically only when the PostgreSQL data volume is empty.
 To discard local database data and initialize again:
 
@@ -129,9 +136,12 @@ The script waits for the task to stop, checks its container exit code, then appl
 configuration for all three ECS services and the ALB. A stopped task is successful only when its
 container exit code is zero. Task logs are in the `database-init` stream prefix of `/ecs/pricing-app`.
 
-Passwords are supplied to Terraform only when initially creating their database/secret value.
-Later start/stop operations retain those values without extracting and resupplying passwords.
+RDS manages the `pricinguser` master password in Secrets Manager. Terraform generates other
+database passwords with ephemeral values and stores them through write-only secret arguments.
+Later start/stop operations retain secret versions without resupplying or rotating passwords.
+Setup applies RDS first so its managed master-secret ARN exists before planning consumers.
 The database initialization task reads its credentials through ECS Secrets Manager injection.
+It synchronizes existing Account and Recommendation login passwords with those secrets.
 
 Open the web address printed by the script. Stop drains all three application services before
 stopping the single RDS instance. Destroy removes the managed application infrastructure and data;
@@ -171,14 +181,21 @@ for one RDS PostgreSQL instance. The existing ALB HTTP allowlist is retained.
 - One-off Fargate task: `pricing-database-init`, using the PostgreSQL client to create
   `accountuser` and `accountdb` when they do not already exist.
 - RDS instance: `pricing-app-db`, hosting `pricingdb` and `accountdb` with separate logins/passwords.
-- Each application owns its schema migrations through Flyway.
+- The Engine owns configuration and Account Store Flyway migrations; Backend and Mock Server
+  production Flyway are disabled. AWS startup ordering changes are tracked in ticket 07 of
+  `.scratch/aws-postgresql-automation/`.
 - CloudWatch log group: `/ecs/pricing-app`, with application and `database-init` stream prefixes.
 
 ### Credentials and state
 
-- Secrets Manager stores `pricing-app/rds-password` and `pricing-app/account-password`.
+- RDS creates and manages its master secret. Terraform manages the Account and Recommendation
+  passwords and the four Engine/transaction-processor role secrets in Secrets Manager.
 - The ECS execution role reads these secrets and injects the required password into each container.
-- Terraform's secret-version resources retain their existing values after initial creation.
+- Terraform 1.11+ and the AWS and Random providers support ephemeral password generation and
+  write-only secret values; database passwords are excluded from new Terraform state.
+- Secret versions remain stable on repeat applies. Increment `secret_string_wo_version` to
+  write a new generated password; PostgreSQL role passwords must be updated with it.
+- Legacy versions of the versioned S3 state may still contain passwords from before migration.
 - The S3 state bucket is `pricing-app-tfstate`, with application state at `terraform.tfstate`
   and state-bucket configuration state at `bootstrap.tfstate`. Moving the local files does not
   change those keys. The bucket retains versioning, encryption, and its public-access block.

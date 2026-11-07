@@ -10,10 +10,14 @@ tags:
 ## Implemented runtime
 
 The standalone `pricing-engine/` server owns evaluation and discovery of pending accounts on
-startup and HTTP wake-ups. Backend configuration CRUD and configuration migrations remain in
-`pricing-backend/`; its synchronous batch endpoint has been removed. The engine reads the Account
+startup and HTTP wake-ups, plus initialization and migrations for all three stores.
+Backend configuration CRUD remains in `pricing-backend/`; its synchronous batch endpoint has
+been removed. The engine reads the Account
 Store, commits relational recommendations and their outbox in the Recommendation Store, then marks
-source completion separately.
+source completion separately. Shared privileged credentials initialize databases, logins, migrations,
+and grants before HTTP readiness at `/openapi.yaml`; runtime connections use restricted logins.
+Startup recovery and pending account processing run on a virtual thread, so pending work and
+unavailable downstream services do not delay readiness.
 
 ```mermaid
 flowchart TB
