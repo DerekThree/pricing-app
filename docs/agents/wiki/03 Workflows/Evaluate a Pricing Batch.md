@@ -11,21 +11,21 @@ tags:
 The standalone Pricing Engine discovers pending account records on startup and HTTP wake-ups.
 `PricingController` accepts payload-free `POST /api/v1/work-available` requests with an empty
 HTTP 202 response. This acknowledges the wake-up without confirming completed pricing.
-The Backend owns configuration CRUD and no longer exposes a synchronous batch endpoint.
+The Backend owns pricing data CRUD and no longer exposes a synchronous batch endpoint.
 
 ```mermaid
 sequenceDiagram
     participant S as PricingService
     participant A as Account Store
     participant E as Pricing Engine
-    participant C as Configuration Store
+    participant C as Pricing Store
     participant R as Recommendation Store
     loop discover and drain until no unprocessed batches remain
         S->>A: discover unprocessed account batch identifiers
         loop one discovered account batch at a time
             S->>A: read accounts, attributes, Fee Requests
             S->>E: RuleEngineBatch with per-account Pricing Dates
-            E->>C: load immutable configuration using REPEATABLE_READ
+            E->>C: load immutable pricing data using REPEATABLE_READ
             E-->>S: RuleEngineBatchResult
             S->>R: commit recommendation records and outbox atomically
             S->>A: commit processed flag
@@ -39,14 +39,14 @@ The Mock Account Processor validates and atomically accepts submissions into the
 `AccountRepository` loads the account records, their individual Pricing Dates, scalar Account
 Attributes, and Fee Requests in a read-only JPA transaction. `AccountMapper` produces the existing
 engine-owned input before that transaction closes. There is no batch-level Pricing Date.
-## 2. Load one configuration snapshot
+## 2. Load one pricing data snapshot
 
-The Pricing Engine collects distinct Pricing Dates and asks `PriceConfigRepository` for one configuration. The JPA adapter loads all Branches and Regions but only Pricing Plans active on at least one submitted Pricing Date, plus their complete Fee and Eligibility Reason graph.
+The Pricing Engine collects distinct Pricing Dates and asks `PricingRepository` for one pricing data snapshot. The JPA adapter loads all Branches and Regions but only Pricing Plans active on at least one submitted Pricing Date, plus their complete Fee and Eligibility Reason graph.
 
-If configuration access fails, evaluation throws `PricingAccessException`. Temporary database
-failures retry the failed operation with bounded attempts and delay. Configuration access retries
+If pricing data access fails, evaluation throws `PricingAccessException`. Temporary database
+failures retry the failed operation with bounded attempts and delay. Pricing data access retries
 finish before calculation begins; storage retries keep the completed result unchanged and do not
-reload configuration. The affected worker retains its slot during delays. Startup recovery runs on
+reload pricing data. The affected worker retains its slot during delays. Startup recovery runs on
 a virtual thread after singleton initialization, checking recommendations before account draining.
 HTTP readiness at `/openapi.yaml` requires successful initialization of all three databases;
 pending processing and unavailable downstream services do not block it.
@@ -79,7 +79,7 @@ and triggers discovery; independent workers continue within the cap.
 
 ## 3. Resolve each account
 
-Accounts are evaluated independently against the same immutable configuration.
+Accounts are evaluated independently against the same immutable pricing data.
 
 ### Resolve the Branch
 
@@ -123,7 +123,7 @@ For each Fee Request:
 
 1. Find the Pricing Plan Fee by exact Fee code. A miss returns `FEE_NOT_FOUND`.
 2. For a percentage Fee, require a transaction amount. Absence returns `MISSING_TRANSACTION`; at the engine boundary, a negative value or more than two decimal places returns `INVALID_TRANSACTION_AMOUNT`.
-3. Validate persisted Eligibility Reason operator/type combinations and values. Invalid configuration returns `INVALID_ELIGIBILITY_CONDITION` for that Fee Request.
+3. Validate persisted Eligibility Reason operator/type combinations and values. Invalid pricing data returns `INVALID_ELIGIBILITY_CONDITION` for that Fee Request.
 4. Evaluate every attached Eligibility Reason. Conditions inside one reason use AND; reasons attached to the Pricing Plan Fee use OR.
 5. If any reason is satisfied, return a **waived** Pricing Decision with every satisfied Eligibility Reason code.
 6. Otherwise return a **charged** Pricing Decision.
@@ -175,6 +175,6 @@ and Recommendation Outbox state and sets the Account Outbox processed flag in it
 If a commit acknowledgement is lost, the engine retries storage of the retained result. A unique
 violation on the recommendation batch or outbox primary key identifies committed output and
 allows the Account Outbox update to finish, without another outbox lookup during storage.
-Other integrity failures still propagate. No configuration is reloaded for retained results.
+Other integrity failures still propagate. No pricing data is reloaded for retained results.
 A restart reevaluates durable account input when its output never committed; no separate durable
 calculation cache is stored.

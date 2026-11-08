@@ -190,7 +190,7 @@ Constraint: `chk_eligibility_reason_conditions_operator`.
 
 V23 replaced the original (`reason_id`, `attribute_id`, `operator`) primary key with the identity `id`. As a result, the schema permits multiple conditions with the same reason, attribute, and operator. Both foreign keys have no explicit delete action.
 
-## Pricing configuration
+## Pricing data
 
 ### `pricing_plans`
 
@@ -226,7 +226,7 @@ The product and region foreign keys have no explicit delete action.
 
 - Primary key: (`pricing_plan_id`, `fee_id`).
 - Constraint `chk_pricing_plan_fees_amount_nonnegative` permits zero and rejects negative amounts.
-- Deleting a pricing plan removes its fee configurations. A fee referenced by a pricing plan cannot be deleted.
+- Deleting a Pricing Plan removes its Pricing Plan Fees. A Fee referenced by a Pricing Plan cannot be deleted.
 
 ### `pricing_plan_fee_reasons`
 

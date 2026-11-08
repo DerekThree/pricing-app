@@ -25,24 +25,24 @@ This vault explains the implemented Pricing application for agents making featur
 | Change backend behavior | [[02 Architecture/Backend]] and [[04 Change Guides/Implement a Feature or Change]] |
 | Change a dashboard screen | [[02 Architecture/Dashboard]] and [[04 Change Guides/Implement a Feature or Change]] |
 | Change an endpoint or payload | [[02 Architecture/API Contract]] |
-| Change Pricing Plan configuration | [[03 Workflows/Configure Pricing]] |
+| Change Pricing Plan data | [[03 Workflows/Configure Pricing]] |
 | Change Pricing Batch evaluation | [[03 Workflows/Evaluate a Pricing Batch]] |
 | Add or move validation | [[05 Reference/Validation and Integrity]] |
 | Work on future distributed processing | [[05 Reference/Current and Planned System]] |
 
 ## Fast mental model
 
-The Backend owns Pricing Configuration CRUD. The standalone `pricing-engine/` Spring Boot server
-owns configuration, Account Store, and Recommendation Store initialization, migrations, evaluation, and
-configuration snapshots.
+The Backend owns pricing data CRUD. The standalone `pricing-engine/` Spring Boot server
+owns Pricing Store, Account Store, and Recommendation Store initialization, migrations, evaluation, and
+pricing data snapshots.
 
 ```mermaid
 flowchart TB
     Admin[Administrator] --> Dashboard[React dashboard]
-    Dashboard -->|configuration HTTP JSON| Backend[Spring Boot backend]
+    Dashboard -->|pricing data HTTP JSON| Backend[Spring Boot backend]
     Backend -->|JPA| PostgreSQL[(PostgreSQL)]
     Engine -->|All three stores' Flyway initialization| PostgreSQL
-    Engine[Standalone Pricing Engine] -->|loads Pricing Configuration| PostgreSQL
+    Engine[Standalone Pricing Engine] -->|loads pricing data| PostgreSQL
 ```
 
 The Backend synchronous batch endpoint and its engine-dependent wiring have been removed.
@@ -83,8 +83,8 @@ See [[05 Reference/Current and Planned System]] for implemented and planned beha
 
 | Location | Responsibility |
 |---|---|
-| `pricing-backend/` | Configuration API, JPA persistence, OpenAPI contract, backend tests |
-| `pricing-engine/` | All three stores' initialization and migrations, wake-up API, capped parallel workers, transactional claims, evaluator, configuration snapshot reads |
+| `pricing-backend/` | Pricing data API, JPA persistence, OpenAPI contract, backend tests |
+| `pricing-engine/` | All three stores' initialization and migrations, wake-up API, capped parallel workers, transactional claims, evaluator, pricing data snapshot reads |
 | `pricing-dashboard/` | React Router SPA, screens and forms, generated TypeScript client, Playwright tests |
 | `docs/ADR/` | Accepted architectural and domain decisions |
 | `docs/Validations.md` | Cross-layer validation ownership and expected errors |

@@ -12,7 +12,7 @@ Use this note to find the implementation seam and the evidence that defines corr
 ## Start from the behavior
 
 1. Name the affected concepts using [[01 Domain/CONTEXT]].
-2. Check the ADRs linked from [[01 Domain/Concept Relationships]] when the change touches lifecycle, shared configuration, Product Applicability, engine evaluation placement, or planned notification architecture.
+2. Check the ADRs linked from [[01 Domain/Concept Relationships]] when the change touches lifecycle, shared pricing data, Product Applicability, engine evaluation placement, or planned notification architecture.
 3. Decide whether the behavior is current or planned using [[05 Reference/Current and Planned System]].
 4. Read the contract, implementation, migration, validation matrix, and tests that already own the behavior.
 
@@ -20,8 +20,8 @@ Use this note to find the implementation seam and the evidence that defines corr
 
 | Change | Primary backend seam | Primary dashboard seam | Essential evidence |
 |---|---|---|---|
-| Add a configuration record type | OpenAPI schema/endpoints; new feature package; migration | list and CRUD routes; generated client | neighboring CRUD API and browser tests |
-| Change a configuration field | OpenAPI model; entity/migration; mapper; service | generated model; list/form | contract alignment, API tests, validation matrix |
+| Add a pricing data record type | OpenAPI schema/endpoints; new feature package; migration | list and CRUD routes; generated client | neighboring CRUD API and browser tests |
+| Change a pricing data field | OpenAPI model; entity/migration; mapper; service | generated model; list/form | contract alignment, API tests, validation matrix |
 | Change Pricing Plan lifecycle | `PricingPlanValidator`, options, database periods | `pricingPlans/crud.tsx` disabled/date behavior | ADR 0001 and `PricingPlanApiTests` |
 | Change Product Applicability | Fee/Account Attribute entities and validators; Eligibility Reason derivation | related forms and option filtering | ADR 0003 plus API and Playwright tests |
 | Change Region resolution | `PrototypeRuleEngine`; Region persistence constraints | Region form/options | engine tests and Region API tests |
@@ -29,9 +29,9 @@ Use this note to find the implementation seam and the evidence that defines corr
 | Change account submission | Mock Account Processor `openapi.yaml`, validator, mapper, controller | regenerated processor client; simulator composition | processor contract/API tests |
 | Change a database constraint | Flyway migration; entity mapping; exception handler | error display only if behavior changes | H2 API tests and PostgreSQL Testcontainers tests |
 
-## Configuration CRUD seam
+## Pricing data CRUD seam
 
-For an ordinary configuration feature, trace one neighboring package end to end:
+For an ordinary pricing data feature, trace one neighboring package end to end:
 
 ```text
 openapi.yaml
@@ -50,7 +50,7 @@ Keep transaction ownership in the service. Use a validator for cross-record or l
 
 ## Pricing Engine seam
 
-Keep evaluation behavior inside `com.pricing.engine`. Engine records should not depend on generated HTTP models or JPA entities. Persistence-specific filtering and graph loading belong behind `PriceConfigRepository`; account input mapping belongs in `AccountMapper`, and recommendation output mapping belongs in `RecommendationMapper`. Store reads and writes use JPA repositories and explicitly named local transaction managers.
+Keep evaluation behavior inside `com.pricing.engine`. Engine records should not depend on generated HTTP models or JPA entities. Persistence-specific filtering and graph loading belong behind `PricingRepository`; account input mapping belongs in `AccountMapper`, and recommendation output mapping belongs in `RecommendationMapper`. Store reads and writes use JPA repositories and explicitly named local transaction managers.
 
 When adding a status or Pricing Decision field, update the engine model and behavior first, then update `RecommendationMapper`, recommendation entities, and a new migration if the stored shape changes. Verify identifier correlation and ensure one failed Fee Request does not abort unrelated work unless the new behavior deliberately changes failure isolation.
 

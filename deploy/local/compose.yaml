@@ -75,8 +75,8 @@ services:
       SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/pricingdb
       SPRING_DATASOURCE_USERNAME: pricingdb_engine
       SPRING_DATASOURCE_PASSWORD: ${ENGINE_PASSWORD:?Set ENGINE_PASSWORD in deploy/local/.env}
-      CONFIGURATION_STORE_BACKEND_USERNAME: pricingdb_backend
-      CONFIGURATION_STORE_BACKEND_PASSWORD: ${BACKEND_PASSWORD}
+      PRICING_STORE_BACKEND_USERNAME: pricingdb_backend
+      PRICING_STORE_BACKEND_PASSWORD: ${BACKEND_PASSWORD}
       ACCOUNT_STORE_URL: jdbc:postgresql://postgres:5432/accountdb
       ACCOUNT_STORE_USERNAME: accountdb_engine
       ACCOUNT_STORE_PASSWORD: ${ACCOUNT_PASSWORD:?Set ACCOUNT_PASSWORD in deploy/local/.env}

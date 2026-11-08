@@ -8,7 +8,7 @@ tags:
 
 # Concept relationships
 
-## Configuration graph
+## Pricing data graph
 
 ```mermaid
 flowchart TD
@@ -41,7 +41,7 @@ Eligibility Reason Product Applicability
   = intersection of Product Applicability for every condition Account Attribute
 ```
 
-An Eligibility Reason with no conditions applies to every Product Type. An intersection with no shared Product Type is invalid. This rule is recorded by [ADR 0003](../../../ADR/0003-use-product-type-applicability-for-shared-configuration.md) and implemented in [EligibilityReasonEntity.java](../../../../pricing-backend/src/main/java/com/pricing/backend/eligibilityreason/EligibilityReasonEntity.java) and [EligibilityReasonValidator.java](../../../../pricing-backend/src/main/java/com/pricing/backend/eligibilityreason/EligibilityReasonValidator.java).
+An Eligibility Reason with no conditions applies to every Product Type. An intersection with no shared Product Type is invalid. This rule is recorded by [ADR 0003](../../../ADR/0003-use-product-type-applicability-for-shared-pricing-data.md) and implemented in [EligibilityReasonEntity.java](../../../../pricing-backend/src/main/java/com/pricing/backend/eligibilityreason/EligibilityReasonEntity.java) and [EligibilityReasonValidator.java](../../../../pricing-backend/src/main/java/com/pricing/backend/eligibilityreason/EligibilityReasonValidator.java).
 
 ## Geographic resolution
 

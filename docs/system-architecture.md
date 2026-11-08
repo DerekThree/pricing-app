@@ -10,9 +10,8 @@ domain modeling, distributed processing, failure handling, deployment,
 observability, and architectural decision-making.
 
 A substantial **Dashboard + Spring Boot backend + PostgreSQL
-configuration database** already exists. It manages pricing
-configuration such as Pricing Plans, Fees, Eligibility
-Reasons/Conditions, Account Attributes, Products, Regions, etc.
+Pricing Store** already exists. It manages pricing data such as Pricing Plans and Pricing Plan Fees,
+Eligibility Reasons and Conditions, Account Attributes, Products, and Regions.
 
 The project has already consumed substantial development time, so future
 work should favor **new architectural capabilities over additional
@@ -24,9 +23,9 @@ Conceptually:
 
 ```mermaid
 flowchart TD
-    DashboardUI[Configuration Dashboard<br/>React] --> DashboardAPI[Dashboard API<br/>Spring Boot]
-    DashboardAPI --> ConfigurationStore[(Configuration Store<br/>PostgreSQL)]
-    ConfigurationStore --> PricingEngine
+    DashboardUI[Pricing Dashboard<br/>React] --> DashboardAPI[Dashboard API<br/>Spring Boot]
+    DashboardAPI --> PricingStore[(Pricing Store<br/>PostgreSQL)]
+    PricingStore --> PricingEngine
 
     Simulator[Simulator<br/>React] --> AccountProcessor[Mock Account Processor<br/>Spring Boot]
     AccountProcessor --> AccountStore[(Account Store<br/>PostgreSQL)]
@@ -48,22 +47,22 @@ flowchart TD
 
     class DashboardUI,Simulator interface
     class AccountProcessor,TransactionProcessor mockProcessor
-    class ConfigurationStore,AccountStore,RecommendationStore database
+    class PricingStore,AccountStore,RecommendationStore database
     class DashboardAPI dashboardApi
     class PricingEngine pricingEngine
     class Spacer invisible
 ```
 
-The Pricing Engine reads pricing configuration from PostgreSQL while
+The Pricing Engine reads pricing data from PostgreSQL while
 processing persisted account batches.
 
 The Account Processor and Transaction Processor are outside the pricing
 system. Both are mocked by the simulator/test environment, but their
 boundaries should behave as if they were independent external systems.
 
-## 3. Dashboard / pricing configuration - IMPLEMENTED
+## 3. Dashboard / pricing data - IMPLEMENTED
 
-The dashboard manages configuration used by the pricing engine:
+The dashboard manages pricing data used by the Pricing Engine:
 
 -   Products
 -   Pricing Plans
@@ -74,7 +73,7 @@ The dashboard manages configuration used by the pricing engine:
 -   Regions/geographic applicability
 -   Effective date ranges
 
-PostgreSQL is appropriate here because the pricing configuration has
+PostgreSQL is appropriate here because the pricing data has
 substantial relational structure.
 
 ### Pricing Plan lifecycle - IMPLEMENTED
@@ -91,7 +90,7 @@ Current proposed mutability:
 -   **Active:** only Plan Name and Active Through can change.
 -   **Past:** only Plan Name can change.
 
-The objective is **historical pricing integrity**: configuration changes
+The objective is **historical pricing integrity**: pricing data changes
 today must not silently alter what an effective/historical pricing plan
 meant previously.
 
@@ -104,7 +103,7 @@ This is **important domain correctness**, not mere UI polish.
 ## 4. Dashboard scope
 
 Finish work necessary for historical integrity, lifecycle correctness,
-important backend validation, preventing invalid configuration, and
+important backend validation, preventing invalid pricing data, and
 correctness of relationships.
 
 Avoid substantial additional time on convenience features, sophisticated
@@ -159,11 +158,11 @@ transaction recommendations.
 ### Relocation implementation status
 
 Ticket 01 provides the standalone `pricing-engine/` Spring Boot server, the relocated evaluator,
-and the immutable configuration snapshot loader. Configuration CRUD and schema migrations remain
+and the immutable pricing data snapshot loader. Pricing data CRUD and Pricing Store migrations remain
 in `pricing-backend/`; the engine validates that existing schema without applying migrations.
-Its configuration-read mappings do not depend on the Backend executable.
+Its pricing data-read mappings do not depend on the Backend executable.
 
-Ticket 02 removes the Backend synchronous batch endpoint and adds startup processing. `PricingService` discovers unprocessed Account Outbox rows and processes the discovered set serially. JPA repositories read accounts with per-account Pricing Dates and map existing evaluator output into relational recommendation records. The recommendation batch, account outcomes, Fee Request outcomes, satisfied Eligibility Reasons, and uniquely keyed Recommendation Outbox row commit in one local transaction. A separate Account Store transaction marks source completion afterward. Recommendation migrations belong to the engine; configuration and Account Store migrations retain their existing owners.
+Ticket 02 removes the Backend synchronous batch endpoint and adds startup processing. `PricingService` discovers unprocessed Account Outbox rows and processes the discovered set serially. JPA repositories read accounts with per-account Pricing Dates and map existing evaluator output into relational recommendation records. The recommendation batch, account outcomes, Fee Request outcomes, satisfied Eligibility Reasons, and uniquely keyed Recommendation Outbox row commit in one local transaction. A separate Account Store transaction marks source completion afterward. Recommendation migrations belong to the engine; Pricing Store and Account Store migrations retain their existing owners.
 
 Ticket 03 adds `POST /api/v1/work-available`, owned by the engine's OpenAPI contract.
 The payload-free request returns an empty HTTP 202 acknowledgement; it does not confirm completed
@@ -189,7 +188,7 @@ outbox again for any new unprocessed batches that arrived during processing.
 If it finds more batches, it processes them in series and checks again after
 finishing them.
 
-Pricing Configuration is captured when evaluation starts, rather than when the
+Pricing data is captured when evaluation starts, rather than when the
 Account Processor accepts the batch. Temporary infrastructure failures receive
 bounded automatic retries with delay. After retries are exhausted, the batch
 remains unprocessed.
@@ -219,7 +218,7 @@ notification to the Pricing Engine indicating that new account work may be avail
 The HTTP notification is a wake-up signal; PostgreSQL is the durable source of pending
 work, and the Pricing Engine queries it for unprocessed batches.
 
-The Pricing Engine reads and processes pending account batches, applies pricing configuration,
+The Pricing Engine reads and processes pending account batches, applies pricing data,
 and persists the resulting transaction recommendations in PostgreSQL. After recommendation
 records are persisted, it sends an HTTP notification to the Transaction Processor indicating
 that new recommendation work may be available. The Transaction Processor then queries the
@@ -268,7 +267,7 @@ service.
 
 Transaction recommendations will be stored in **PostgreSQL**.
 
-The recommendation store is separate in purpose from the pricing configuration
+The recommendation store is separate in purpose from the Pricing Store
 data, even if both use PostgreSQL. Recommendation data is generated by the
 Pricing Engine and is expected to be primarily append-oriented / immutable after
 calculation.
@@ -440,7 +439,7 @@ recognition of the committed result, independently of the Account Outbox update.
 
 A restart loses calculations that never committed. Startup evaluates those batches again from
 durable account input; it adds no durable calculation cache. Committed output is recognized
-before evaluation, so changed Pricing Configuration cannot replace it during recovery.
+before evaluation, so changed pricing data cannot replace it during recovery.
 
 The same uniqueness rule also protects against two Pricing Engine instances
 attempting to complete the same batch concurrently: only one transaction can
@@ -495,7 +494,7 @@ Typical ADR:
 Good ADR candidates:
 
 -   Pricing Plan lifecycle, mutability, and effects on referenced
-    configuration
+    pricing data
 -   PostgreSQL recommendation persistence strategy
 -   HTTP wake-up notifications with PostgreSQL-backed pending-work recovery
 -   Transactional outbox and application-owned publishing/restart recovery

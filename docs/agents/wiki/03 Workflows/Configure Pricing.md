@@ -3,12 +3,12 @@ status: current
 verified: 2026-08-29
 tags:
   - workflow
-  - configuration
+  - pricing-data
 ---
 
 # Configure pricing
 
-Pricing Configuration is assembled from reusable records into an effective Pricing Plan.
+Pricing data is assembled from reusable records into an effective Pricing Plan.
 
 ## Dependency order
 
@@ -32,13 +32,13 @@ A practical creation order is:
 5. Create Eligibility Reasons whose conditions reference Account Attributes.
 6. Create a Pricing Plan for a Product and Region, then add Pricing Plan Fees with Fee Amounts and optional Eligibility Reasons.
 
-## Region configuration
+## Region data
 
 A Branch, ZIP code, or state can belong to at most one Region at its own tier. The Region form excludes values already claimed by another Region. The database uniqueness constraints are authoritative.
 
 The three Region membership types are not interchangeable. Evaluation prefers exact Branch membership, then ZIP code, then state.
 
-## Reusable pricing configuration
+## Reusable pricing data
 
 ### Fee
 
@@ -46,7 +46,7 @@ A Fee has no amount. It defines code, name, calculation type, and Product Applic
 
 ### Account Attribute
 
-An Account Attribute defines a code, name, type, and Product Applicability. Supported types are text, decimal, integer, date, and boolean. The type controls both condition-value normalization during configuration and runtime comparison during evaluation.
+An Account Attribute defines a code, name, type, and Product Applicability. Supported types are text, decimal, integer, date, and boolean. The type controls both condition-value normalization during pricing data entry and runtime comparison during evaluation.
 
 ### Eligibility Reason
 
@@ -75,13 +75,13 @@ The application current date classifies each Pricing Plan:
 - **Active:** only Plan Name and Active Through may change; deletion is rejected.
 - **Past:** only Plan Name may change; deletion is allowed.
 
-The lock extends through shared configuration as recorded in [ADR 0002](../../../ADR/0002-restrict-updates-to-shared-pricing-configuration.md):
+The lock extends through shared pricing data as recorded in [ADR 0002](../../../ADR/0002-restrict-updates-to-shared-pricing-data.md):
 
 - a Fee definition cannot change after any Pricing Plan contains it, but its name can;
 - an Eligibility Reason's code or conditions cannot change after any Pricing Plan Fee uses it, but its name can;
 - an Account Attribute's code, type, or Product Applicability cannot change after an Eligibility Reason uses it, but its name can.
 
-Membership reordering is not a definition change. When protected configuration must change, create a replacement record and use it from the scheduled Pricing Plan.
+Membership reordering is not a definition change. When protected pricing data must change, create a replacement record and use it from the scheduled Pricing Plan.
 
 ## Deletion integrity
 

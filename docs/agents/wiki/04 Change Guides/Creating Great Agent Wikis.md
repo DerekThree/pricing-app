@@ -130,7 +130,7 @@ For each important workflow, document:
 - isolated failures versus whole-request failures;
 - the tests that demonstrate edge cases.
 
-[[03 Workflows/Evaluate a Pricing Batch]] is an example: it follows one request from contract validation through configuration loading, account resolution, Fee Request evaluation, and result correlation. That flow gives agents a model they can use when changing any one layer.
+[[03 Workflows/Evaluate a Pricing Batch]] is an example: it follows one request from contract validation through pricing data loading, account resolution, Fee Request evaluation, and result correlation. That flow gives agents a model they can use when changing any one layer.
 
 ### 9. Translate knowledge into change impact
 

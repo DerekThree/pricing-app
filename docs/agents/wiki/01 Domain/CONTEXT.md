@@ -12,11 +12,11 @@ tags:
 
 The canonical definitions live in the repository [CONTEXT.md](../../../../CONTEXT.md). This note keeps the same vocabulary close to the rest of the vault and emphasizes how the terms connect. If wording diverges, the repository `CONTEXT.md` wins.
 
-## Configuration
+## Pricing data
 
 ### Pricing Plan
 
-A pricing configuration for one Product and one Region over an inclusive effective period. Its lifecycle is scheduled, active, or past relative to the application current date. A Pricing Plan may contain no Pricing Plan Fees.
+Pricing data for one Product and one Region over an inclusive effective period is represented by a Pricing Plan. Its lifecycle is scheduled, active, or past relative to the application current date. A Pricing Plan may contain no Pricing Plan Fees.
 
 Use **Pricing Plan**, not “plan record” or “pricing row.”
 
@@ -58,7 +58,7 @@ Use **Account Attribute**, not “account field” or “eligibility input.”
 
 ### Product Applicability
 
-The Product Types for which reusable configuration can be used. Fees and Account Attributes store a non-empty list. An Eligibility Reason derives the intersection shared by its condition Account Attributes; a reason without conditions applies to all Product Types.
+The Product Types for which reusable pricing data can be used. Fees and Account Attributes store a non-empty list. An Eligibility Reason derives the intersection shared by its condition Account Attributes; a reason without conditions applies to all Product Types.
 
 Use **Product Applicability**, not “product category” or “universal applicability.”
 
@@ -69,6 +69,12 @@ Use **Product Applicability**, not “product category” or “universal applic
 A batch is a group of records identified by `batchId`. An account batch contains account information supplied by the Mock Account Processor. Its recommendation batch contains transaction recommendation records produced by the Pricing Engine and retains the same identifier.
 
 Use **Pricing Batch**, not “batch job” or “simulator run.”
+
+### Pricing Store
+
+The authoritative database for pricing data, including Products, Branches, Regions, Pricing Plans,
+Pricing Plan Fees, Eligibility Reasons, and Account Attribute definitions. The pricing backend writes
+this data; the Pricing Engine reads it.
 
 ### Account Store
 

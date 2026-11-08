@@ -10,7 +10,7 @@ The Pricing Engine starts work from an account-batch-ready notification that ide
 
 A logical Pricing Batch may contain approximately 100,000 accounts. Performance and consistency must therefore be evaluated per chunk rather than across the entire logical batch at once. The chunk size has not been selected.
 
-Pricing Configuration consists of Products, Branches, Regions, Pricing Plans, Pricing Plan Fees, Eligibility Reasons, conditions, and Account Attribute definitions. It is expected to contain substantially fewer records than account batches. The pricing backend is the only writer of this configuration, and the Pricing Engine reads it. Whether account-batch data and Pricing Decisions use the same database as Pricing Configuration or a separate database remains open.
+Pricing data consists of Products, Branches, Regions, Pricing Plans, Pricing Plan Fees, Eligibility Reasons, conditions, and Account Attribute definitions. It is expected to contain substantially fewer records than account batches. The pricing backend is the only writer of this data, and the Pricing Engine reads it. Whether account-batch data and Pricing Decisions use the same database as Pricing data or a separate database remains open.
 
 Every option must implement the same behavior: exact code lookup; Branch, then ZIP code, then state Region precedence; Product, Region, and Pricing Date Plan selection; required Account Attribute validation; typed condition comparison; AND within one Eligibility Reason and OR between Reasons; flat and percentage Fee calculation; and isolated account and Fee statuses. The choice in this ADR is where that behavior executes and how data crosses the database seam.
 
@@ -18,35 +18,35 @@ Every option must implement the same behavior: exact code lookup; Branch, then Z
 
 ### Evaluate all pricing behavior in Java
 
-A batch worker reads a bounded chunk of persisted account records and passes engine-owned account models to the Pricing Engine, which owns the business logic. It derives configuration criteria from the chunk and calls an engine-owned `PricingConfigurationRepository`. A JPA adapter performs bulk reads and returns an immutable `PricingConfigurationSnapshot`. The snapshot contains Products and Branches keyed by code, Regions and their memberships, and candidate Pricing Plans containing their Fees, Eligibility Reasons, conditions, and Account Attribute definitions.
+A batch worker reads a bounded chunk of persisted account records and passes engine-owned account models to the Pricing Engine, which owns the business logic. It derives pricing data criteria from the chunk and calls the engine-owned `PricingRepository`. The repository returns an immutable `Pricing` model containing Products and Branches keyed by code, Regions and their memberships, and candidate Pricing Plans containing their Fees, Eligibility Reasons, conditions, and Account Attribute definitions.
 
 - **Benefits:**
   - Keeps Region resolution, Plan selection, validation, condition evaluation, status derivation, and monetary calculation together in one Java module.
   - Keeps the engine independent of PostgreSQL query language, stored-function deployment, JPA entities, and the account-batch-ready notification transport.
-  - Supports fast TDD of real pricing behavior with an in-memory `PricingConfigurationRepository`; PostgreSQL tests are limited to the JPA adapter and database constraints.
+  - Supports fast TDD of real pricing behavior with an in-memory `PricingRepository`; PostgreSQL tests are limited to the JPA adapter and database constraints.
   - Keeps typed values, date comparison, `BigDecimal` calculation, and impossible result combinations explicit in Java types.
   - Separates account-batch-ready notification handling and account-batch persistence from pricing rules.
 - **Costs:**
-  - Requires a mapping layer from persisted entities or projections into an additional immutable configuration representation.
+  - Requires a mapping layer from persisted entities or projections into the immutable pricing data representation.
   - Requires several bulk queries behind one repository call. They need a read-only `REPEATABLE_READ` transaction if one chunk must observe a single database snapshot.
-  - Transfers Pricing Configuration from the database into the engine for every chunk unless cross-chunk caching is a part of the design.
+  - Transfers pricing data from the database into the engine for every chunk unless cross-chunk caching is a part of the design.
   - Transfers each account chunk from its database into the application before evaluation.
   - Uses application heap and CPU to evaluate every account and Fee Request.
   - Does not automatically exploit PostgreSQL's set-based execution or query parallelism for the account calculations.
 
-### Resolve configuration in SQL and evaluate decisions in Java
+### Resolve pricing data in SQL and evaluate decisions in Java
 
-The caller supplies engine-owned account records for one Pricing Engine invocation. The Pricing
-Configuration adapter uses their distinct per-account Pricing Dates to limit Pricing Plans to those
-active on at least one submitted date. A batch may contain accounts with different Pricing Dates.
+The caller supplies engine-owned account records for one Pricing Engine invocation. The pricing data
+adapter uses distinct per-account Pricing Dates to limit Pricing Plans to those active on at least
+one submitted date. A batch may contain accounts with different Pricing Dates.
 The number of Branches and Regions is much smaller than the number of
 Pricing Plans, so database-side filtering is materially more valuable for Plans than for those
-configuration records. Java receives immutable Pricing Configuration and performs Region and Fee resolution, Account Attribute validation, typed condition evaluation, waiver decisions, status mapping, and monetary calculation.
+pricing data records. Java receives immutable pricing data and performs Region and Fee resolution, Account Attribute validation, typed condition evaluation, waiver decisions, status mapping, and monetary calculation.
 
 - **Benefits:**
-  - Excludes Pricing Plans that were not active on any submitted account's Pricing Date before configuration is transferred to Java.
-  - Uses the distinct account Pricing Dates to filter the configuration type with the largest expected record count.
-  - Reduces configuration transfer and Java heap use without moving Account Attribute validation, condition evaluation, waiver decisions, status mapping, or monetary calculation into SQL.
+  - Excludes Pricing Plans that were not active on any submitted account's Pricing Date before pricing data is transferred to Java.
+  - Uses the distinct account Pricing Dates to filter the pricing data type with the largest expected record count.
+  - Reduces pricing data transfer and Java heap use without moving Account Attribute validation, condition evaluation, waiver decisions, status mapping, or monetary calculation into SQL.
   - Keeps dynamic type handling, Eligibility Reason semantics, failure isolation, and financial rounding in Java, where they are easier to express and unit-test.
   - Avoids adding database-side filtering for Fees, Branches, and Regions, whose record counts are expected to be much smaller than the number of Pricing Plans.
 - **Costs:**
@@ -58,14 +58,14 @@ configuration records. Java receives immutable Pricing Configuration and perform
 
 ### Evaluate all pricing behavior in SQL
 
-A native SQL query or PostgreSQL function accepts a batch or chunk identity, reads the persisted accounts, Account Attributes, and Fee Requests, and returns final account statuses and Fee Decisions. SQL performs configuration lookup, Region and Plan resolution, validation, condition evaluation, status derivation, and monetary calculation. Java coordinates the batch invocation and maps the results but contains no pricing behavior.
+A native SQL query or PostgreSQL function accepts a batch or chunk identity, reads the persisted accounts, Account Attributes, and Fee Requests, and returns final account statuses and Fee Decisions. SQL performs pricing data lookup, Region and Plan resolution, validation, condition evaluation, status derivation, and monetary calculation. Java coordinates the batch invocation and maps the results but contains no pricing behavior.
 
 Invalid input does not have to abort the entire statement. The SQL can retain Attribute values as raw JSON, derive separate `is_present` and `is_valid` flags, validate JSON types before conversion, and cast only guarded values. A null typed value alone is insufficient because it would conflate missing, invalid, and explicit null input. Recognized invalid data can therefore become `MISSING_ATTRIBUTE`, `INVALID_ATTRIBUTE_TYPE`, or another agreed status, while an unhandled database failure aborts the chunk.
 
 - **Benefits common to both database topologies:**
   - Executes relational lookup and pricing decisions set-wise and can return final results in one statement.
-  - Provides one statement-level configuration view without a multi-query application snapshot.
-  - Avoids transferring resolved Pricing Configuration to Java.
+  - Provides one statement-level pricing data view without a multi-query application snapshot.
+  - Avoids transferring resolved pricing data to Java.
   - Can minimize application heap and CPU use and reduce application implementation size.
   - Centralizes pricing behavior in one database implementation used by every caller of the function.
   - Makes lack of result-order guarantees natural because results are correlated by account number and Fee Request ID.
@@ -74,43 +74,43 @@ Invalid input does not have to abort the entire statement. The SQL can retain At
   - Makes PostgreSQL or the native SQL implementation the actual Pricing Engine; a Java class around it is primarily a serialization and error-mapping adapter. That shape is not inherently slower, but the Java module no longer owns substantive business logic.
   - Requires a large SQL pipeline for status derivation, safe typed conversions, empty and duplicate Attributes, unconditional Reasons, multiple satisfied Reasons, and isolated Fee errors.
   - Couples pricing behavior to PostgreSQL features and the current relational schema.
-  - Uses database CPU, memory, I/O, connections, and temporary working space for business computation. Low configuration-write traffic reduces contention but does not remove capacity considerations.
+  - Uses database CPU, memory, I/O, connections, and temporary working space for business computation. Low pricing data write traffic reduces contention but does not remove capacity considerations.
   - Makes repository mocks unsuitable for pricing-rule tests because mocking the SQL function also mocks the pricing behavior. Meaningful TDD must execute PostgreSQL, although the project already has PostgreSQL Testcontainers support.
   - Makes debugging and profiling depend more heavily on SQL plans, database fixtures, and database observability.
   - A stored function centralizes deployment of executable business behavior in the shared database. Rolling callers must remain compatible with its signature and semantics. Packaging native SQL with the engine server reduces function-version coupling but still couples the query to the schema.
   - Set-wise joins can still create large intermediate cardinalities inside PostgreSQL even when only aggregated results cross the network.
 
-#### Keep account data and Pricing Configuration in the same database
+#### Keep account data and pricing data in the same database
 
-The SQL implementation reads persisted account-chunk rows and Pricing Configuration locally.
+The SQL implementation reads persisted account-chunk rows and pricing data locally.
 
 - **Additional benefits:**
-  - Avoids moving Pricing Configuration or persisted account data between databases.
+  - Avoids moving pricing data or persisted account data between databases.
   - Lets the worker invoke pricing by batch or chunk identity rather than fetching account rows and sending them back to the database.
-  - Allows local joins, indexes, and a single database snapshot across account and configuration data.
-  - Avoids cross-database consistency and configuration-transfer protocols.
+  - Allows local joins, indexes, and a single database snapshot across account and pricing data.
+  - Avoids cross-database consistency and pricing data transfer protocols.
 - **Additional costs:**
-  - Couples account-batch storage, Pricing Configuration, and pricing execution to one database's availability and capacity.
+  - Couples account-batch storage, pricing data, and pricing execution to one database's availability and capacity.
 
-#### Fetch Pricing Configuration and pass it to the database holding account data
+#### Fetch pricing data and pass it to the database holding account data
 
-The batch worker or an adapter reads the smaller Pricing Configuration snapshot from its authoritative database and supplies it to the database that holds the account chunk. It may use JSON parameters, temporary or staging tables, database-native composite arrays, or another explicitly versioned transfer representation. SQL then evaluates accounts next to their stored data.
+The batch worker or an adapter reads the smaller pricing data snapshot from its authoritative database and supplies it to the database that holds the account chunk. It may use JSON parameters, temporary or staging tables, database-native composite arrays, or another explicitly versioned transfer representation. SQL then evaluates accounts next to their stored data.
 
 - **Additional benefits:**
-  - Moves the smaller Pricing Configuration dataset rather than moving a much larger account batch.
-  - Keeps Pricing Configuration authoritative in the pricing database while allowing computation to run beside account data.
+  - Moves the smaller pricing data set rather than moving a much larger account batch.
+  - Keeps pricing data authoritative in the Pricing Store while allowing computation to run beside account data.
   - Avoids returning a multiplied hybrid result to Java because SQL returns only final Pricing Decisions.
-  - Allows account storage and decision storage to scale independently from the configuration database.
-  - Can reuse one transferred configuration snapshot across several chunks if an explicit lifecycle and invalidation policy permits it.
+  - Allows account storage and decision storage to scale independently from the Pricing Store.
+  - Can reuse one transferred pricing data snapshot across several chunks if an explicit lifecycle and invalidation policy permits it.
 - **Additional costs:**
   - Requires connections, credentials, failure handling, and observability for two databases.
-  - Cannot obtain one atomic snapshot across independent databases without an additional configuration version or snapshot protocol.
+  - Cannot obtain one atomic snapshot across independent databases without an additional pricing data version or snapshot protocol.
   - Requires serialization and type mapping for Products, Branches, Regions, Plans, Fees, Reasons, conditions, and Attribute definitions.
-  - Requires staging cleanup or transaction-scoped temporary data, plus indexing if the transferred configuration is queried at scale.
-  - Re-transferring configuration for every chunk adds overhead; reusing it creates cache lifetime and invalidation decisions.
-  - Creates an intermediate configuration contract that must remain compatible with both the authoritative schema and the SQL evaluator.
+  - Requires staging cleanup or transaction-scoped temporary data, plus indexing if the transferred pricing data is queried at scale.
+  - Re-transferring pricing data for every chunk adds overhead; reusing it creates cache lifetime and invalidation decisions.
+  - Creates an intermediate pricing data contract that must remain compatible with both the authoritative schema and the SQL evaluator.
   - Moves pricing compute load to the account database and couples evaluation SQL to that database's engine and schema.
-  - A partial failure can occur after configuration is fetched but before it is staged or evaluated, requiring the chunk to be retried safely.
+  - A partial failure can occur after pricing data is fetched but before it is staged or evaluated, requiring the chunk to be retried safely.
 
 ## Decision
 
@@ -118,17 +118,17 @@ Resolve candidate Pricing Plans using all distinct per-account Pricing Dates in 
 then evaluate Region selection, exact Pricing Plan selection, validation, eligibility, Fee calculation,
 and statuses in Java.
 
-The adapter loads one immutable Pricing Configuration per Pricing Engine invocation using phased bulk
+The adapter loads one immutable pricing data snapshot per Pricing Engine invocation using phased bulk
 reads in one read-only `REPEATABLE_READ` transaction. Java evaluation starts after that transaction
 closes. This decision selects the evaluation boundary; account-batch persistence, notification,
 Pricing Decision persistence, and database topology are specified separately by the asynchronous Pricing Engine workflow.
 
-The evaluator, engine-owned input/result/configuration models, and configuration-read adapter live
-in the standalone `pricing-engine/` Spring Boot server. The Backend retains configuration CRUD and
+The evaluator, engine-owned input/result/pricing data models, and pricing data-read adapter live
+in the standalone `pricing-engine/` Spring Boot server. The Backend retains pricing data CRUD and
 schema migrations. The engine has local JPA read mappings, validates the existing schema, and has
 no dependency on the Backend executable or a shared pricing-engine library.
 
-Tickets 01 and 02 complete the cutover: the Backend synchronous batch endpoint is removed, and engine startup processes pending account records serially. Account and Recommendation Stores have separate JPA persistence units and local transactions. Relational recommendation records and one uniquely keyed outbox row commit together before source completion. The Backend owns configuration migrations, the Mock Account Processor owns Account Store migrations, and the engine owns Recommendation Store migrations. Subsequent tickets add wake-ups, further scans, notification delivery, and recovery.
+Tickets 01 and 02 complete the cutover: the Backend synchronous batch endpoint is removed, and engine startup processes pending account records serially. Account and Recommendation Stores have separate JPA persistence units and local transactions. Relational recommendation records and one uniquely keyed outbox row commit together before source completion. The Backend owns Pricing Store migrations, the Mock Account Processor owns Account Store migrations, and the engine owns Recommendation Store migrations. Subsequent tickets add wake-ups, further scans, notification delivery, and recovery.
 
 Ticket 07 recognizes an existing Recommendation Outbox row before evaluation and repairs the
 Account Outbox's processed flag in its own transaction. When a commit acknowledgement is lost,
@@ -139,10 +139,10 @@ there is no separate durable cache of calculations.
 
 ## Rationale
 
-Filtering candidate Pricing Plans in PostgreSQL reduces transfer of the configuration type expected to
+Filtering candidate Pricing Plans in PostgreSQL reduces transfer of the pricing data type expected to
 have the greatest cardinality. Keeping the remaining behavior in Java preserves one explicit,
 transport-independent Pricing Engine, supports fast behavioral tests with a deterministic
-configuration repository, and makes the system more scalable for large size batches than the full SQL option.
+pricing data repository, and makes the system more scalable for large size batches than the full SQL option.
 
 This choice does not assume where future persisted account batches or Pricing Decisions will live.
 Representative measurements may justify revisiting the boundary, but the current implementation no
@@ -152,12 +152,12 @@ longer leaves it open.
 
 - The account-batch-ready notification identifies persisted work and does not carry account records.
 - The mechanism used to deliver that notification does not depend on this decision.
-- The pricing backend remains the only writer of Pricing Configuration.
+- The pricing backend remains the only writer of pricing data.
 - Pricing Decision storage remains a separate open choice.
-- One Pricing Engine invocation observes one immutable Pricing Configuration loaded through phased
+- One Pricing Engine invocation observes one immutable pricing data snapshot loaded through phased
   bulk reads in a read-only `REPEATABLE_READ` transaction.
-- Configuration consistency across all chunks of a logical batch remains outside this ADR.
-- Engine behavior is tested through an in-memory Pricing Configuration repository; SQL filtering,
+- Pricing data consistency across all chunks of a logical batch remains outside this ADR.
+- Engine behavior is tested through an in-memory pricing data repository; SQL filtering,
   mapping, bulk loading, and snapshot consistency require PostgreSQL integration tests.
 - Pricing Plan active-period semantics must remain aligned between the adapter query and Java's exact
   Pricing Plan selection.

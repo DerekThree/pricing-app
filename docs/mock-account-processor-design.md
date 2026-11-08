@@ -8,7 +8,7 @@ The Mock Account Processor accepts and persists simulated Pricing Batches and no
 Pricing Engine that work may be available. The Mock Transaction Processor and Pricing Engine
 processing are outside this design.
 
-The Account Store uses a separate PostgreSQL database from Pricing Configuration.
+The Account Store uses a separate PostgreSQL database from the Pricing Store.
 
 ## Capacity and database access
 

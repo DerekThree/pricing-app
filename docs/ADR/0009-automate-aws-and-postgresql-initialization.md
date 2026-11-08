@@ -6,11 +6,11 @@ Retain the existing Terraform backend bootstrap. Terraform owns AWS infrastructu
 
 The Pricing Engine owns initialization of `pricingdb`, `accountdb`, and `recommendationdb`: ensuring databases and login roles exist, running all three stores' Flyway migrations, and assigning permissions. Move Backend and Mock Server migrations into the Engine and disable their Flyway execution. Initialization uses one shared privileged `pricinguser` login for database/login creation, Flyway migrations, and grants across all three databases; normal operations use restricted accounts without migration privileges. Remove the separate database-init ECS task. Other application services start only after initialization succeeds.
 
-This ownership follows the Engine's existing connections to all three stores; the Backend connects only to the configuration store. Runtime grants are:
+This ownership follows the Engine's existing connections to all three stores; the Backend connects only to the Pricing Store. Runtime grants are:
 
 | Runtime user | Database | Permissions |
 |---|---|---|
-| Backend restricted login | `pricingdb` | SELECT, INSERT, UPDATE, DELETE on configuration tables; required sequence access |
+| Backend restricted login | `pricingdb` | SELECT, INSERT, UPDATE, DELETE on Pricing Store tables; required sequence access |
 | Mock Server restricted login | `accountdb` | INSERT and SELECT on Account Store tables; required sequence access |
 | `pricingdb_engine` | `pricingdb` | SELECT on the 15 business tables |
 | `accountdb_engine` | `accountdb` | SELECT on `accounts`, `account_attributes`, `fee_requests`, `batch_outbox`; UPDATE on `batch_outbox` |
@@ -21,7 +21,7 @@ Backend and Mock Server runtime logins do not own schemas or run migrations.
 
 Existing database data and credentials need no preservation. Choose the simplest treatment; neither retaining nor deleting them is a requirement.
 
-The Engine initializes on every startup before becoming ready, reusing the Configuration Store URL with privileged initialization credentials. RDS or local PostgreSQL creates `pricingdb`; the Engine creates the other two databases. Start leaves an already-running application unchanged and preserves running service counts during partial startup, waiting for Engine readiness before starting other stopped services. If initialization fails, startup stops and retains resources and previously running services; an Engine newly started by this invocation is stopped. A developer corrects the cause before running Start again; the script does not correct configuration or roll back schemas. Local containers use the same Engine-owned initialization and migration path as AWS.
+The Engine initializes on every startup before becoming ready, reusing the Pricing Store URL with privileged initialization credentials. RDS or local PostgreSQL creates `pricingdb`; the Engine creates the other two databases. Start leaves an already-running application unchanged and preserves running service counts during partial startup, waiting for Engine readiness before starting other stopped services. If initialization fails, startup stops and retains resources and previously running services; an Engine newly started by this invocation is stopped. A developer corrects the cause before running Start again; the script does not correct configuration or roll back schemas. Local containers use the same Engine-owned initialization and migration path as AWS.
 
 Include Flyway-managed immutability triggers in this work. Allow inserts but reject UPDATE, DELETE, and TRUNCATE on `accounts`, `account_attributes`, `fee_requests`, `account_recommendations`, `fee_request_recommendations`, and `recommendation_eligibility_reasons`. Both `batch_outbox` and `recommendation_outbox` reject DELETE, TRUNCATE, and changes to `batch_id`, without role-based exceptions. Other columns retain the handoff's table-wide UPDATE grants, including future columns.
 

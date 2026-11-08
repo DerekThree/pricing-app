@@ -30,6 +30,11 @@ When output names a domain concept, use the term defined in
 project's established vocabulary. If the concept is not defined, note the gap for
 domain modeling.
 
+For storage naming, use **Account Store** for account data and the account root,
+**Pricing Store** for pricing data and the pricing root, and **Recommendation Store**
+for recommendation data and the recommendation root. Keep specific domain entities,
+such as Pricing Plans and Pricing Plan Fees, named individually.
+
 ## Flag ADR conflicts
 
 If output contradicts an existing ADR, surface the conflict explicitly rather than

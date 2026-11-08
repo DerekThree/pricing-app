@@ -8,7 +8,7 @@ tags:
 
 # Current and planned system
 
-The repository contains implemented configuration CRUD, durable Mock Account Processor acceptance,
+The repository contains implemented pricing data CRUD, durable Mock Account Processor acceptance,
 and standalone Pricing Engine processing triggered by startup and HTTP wake-ups. Each instance
 admits parallel workers up to `ENGINE_MAX_WORKERS` (default `3`). Workers claim Account Outbox rows
 with `processed = false AND error IS NULL` using `FOR UPDATE SKIP LOCKED`, so multiple instances
@@ -35,11 +35,11 @@ recommendations switch recovery to source completion without recalculation or re
 
 | Capability | Current source | Planned or decided direction |
 |---|---|---|
-| Pricing Configuration | Implemented in the Spring Boot backend and PostgreSQL | Remains authoritative in the pricing backend |
+| Pricing data | Implemented in the Spring Boot backend and PostgreSQL | Remains authoritative in the pricing backend |
 | Dashboard | Implemented React Router SPA | Major dashboard convenience expansion is not the current architectural priority |
 | Simulator | Backend date/options; Mock Account Processor `POST /api/v1/mock/acc/batch` with HTTP 202 acceptance | Completed asynchronous pricing results remain future work |
 | Pricing Engine | Standalone evaluator; capped parallel workers across multiple instances | No global FIFO order |
-| Configuration loading | Candidate Pricing Plans filtered by submitted Pricing Dates in PostgreSQL; remaining evaluation in Java | Evaluation boundary accepted by ADR 0004 |
+| Pricing data loading | Candidate Pricing Plans filtered by submitted Pricing Dates in PostgreSQL; remaining evaluation in Java | Evaluation boundary accepted by ADR 0004 |
 | Pricing Batch storage | Mock Account Processor persists account records and Account Outbox in PostgreSQL | Engine reads accepted accounts with their individual Pricing Dates |
 | Batch trigger | Database initialization gates HTTP readiness; startup recovery runs in the background; payload-free `POST /api/v1/work-available` returns empty HTTP 202 | No queued wake-ups or healthy idle polling |
 | Pricing Decisions | Relational recommendations and one outbox row; post-commit HTTP wake-ups | Transaction Processor consumes persisted output |
@@ -67,7 +67,7 @@ The Transaction Processor remains future work.
 
 ```text
 Dashboard Simulator
-  -> Backend for configuration, Simulator options, and Application Date
+  -> Backend for pricing data, Simulator options, and Application Date
   -> Mock Account Processor POST /api/v1/mock/acc/batch with account-level pricingDate
   -> durable batch acceptance
   -> HTTP 202 batchId and message

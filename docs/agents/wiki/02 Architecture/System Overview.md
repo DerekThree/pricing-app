@@ -11,7 +11,7 @@ tags:
 
 The standalone `pricing-engine/` server owns evaluation and discovery of pending accounts on
 startup and HTTP wake-ups, plus initialization and migrations for all three stores.
-Backend configuration CRUD remains in `pricing-backend/`; its synchronous batch endpoint has
+Backend pricing data CRUD remains in `pricing-backend/`; its synchronous batch endpoint has
 been removed. The engine reads the Account
 Store, commits relational recommendations and their outbox in the Recommendation Store, then marks
 source completion separately. Shared privileged credentials initialize databases, logins, migrations,
@@ -28,16 +28,16 @@ flowchart TB
 
     subgraph Backend process
         Controllers[OpenAPI controller adapters]
-        Services[Configuration services and validators]
+        Services[Pricing data services and validators]
     end
 
     subgraph Pricing Engine process
         Pricing[PricingService]
         Engine[PrototypeRuleEngine]
-        Adapter[JpaPriceConfigRepository]
+        Adapter[PricingRepository]
     end
 
-    DB[(Configuration Store)]
+    DB[(Pricing Store)]
     Accounts[(Account Store)]
     Recommendations[(Recommendation Store)]
 
@@ -53,11 +53,11 @@ flowchart TB
     Adapter --> DB
 ```
 
-The backend owns Pricing Configuration writes. Flyway creates and evolves the schema; Hibernate validates the mappings rather than creating tables. The dashboard consumes the backend's OpenAPI contract through generated TypeScript code.
+The backend owns pricing data writes. Flyway creates and evolves the schema; Hibernate validates the mappings rather than creating tables. The dashboard consumes the backend's OpenAPI contract through generated TypeScript code.
 
 ## Two major capabilities
 
-### Pricing Configuration
+### Pricing data
 
 CRUD endpoints manage:
 
@@ -96,9 +96,9 @@ completion. See [[03 Workflows/Evaluate a Pricing Batch]].
 
 The simulator normally copies its application date into every drafted account's Pricing Date when it submits a batch. The Pricing Engine itself evaluates the submitted Pricing Date and does not read the simulator clock.
 
-## Configuration snapshot boundary
+## Pricing data snapshot boundary
 
-For one Pricing Engine invocation, [JpaPriceConfigRepository.java](../../../../pricing-engine/src/main/java/com/pricing/engine/pricingStore/JpaPriceConfigRepository.java) loads one immutable `PriceConfig`:
+For one Pricing Engine invocation, [PricingRepository.java](../../../../pricing-engine/src/main/java/com/pricing/engine/pricingStore/PricingRepository.java) loads one immutable `Pricing`:
 
 - every Branch and Region membership;
 - only Pricing Plans active on at least one distinct submitted Pricing Date;

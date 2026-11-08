@@ -38,7 +38,7 @@ Orval generates separate clients and model namespaces under `app/generated/backe
 and `app/generated/accountProcessor/` for the Mock Account Processor. API generation cleans both
 outputs first. The mutators preserve status, body, and headers rather than throwing for non-2xx
 responses. `backendMutator` and `accountProcessorMutator` share `app/utils/apiMutator.ts`.
-Configuration, Simulator options, and Application Date use the Backend client; Simulator
+Pricing data, Simulator options, and Application Date use the Backend client; Simulator
 batches use the processor client at `POST /api/v1/mock/acc/batch`, retaining account-level
 `pricingDate`. HTTP 202 returns `batchId` and `message`, rather than completed pricing results.
 
@@ -79,7 +79,7 @@ The same Fee Request ID may appear in different accounts, and one account may re
 
 ## Scalar Account Attribute values
 
-The contract permits Account Attribute values that are strings, numbers, or booleans. Backend configuration conditions and Mock Account Processor submissions map their generated scalar interfaces through custom Jackson deserializers. The engine reads persisted Account Attribute scalars through a JPA converter. The Pricing Engine later compares the runtime value to the configured Account Attribute type and returns an account status for a mismatch.
+The contract permits Account Attribute values that are strings, numbers, or booleans. Backend pricing data conditions and Mock Account Processor submissions map their generated scalar interfaces through custom Jackson deserializers. The engine reads persisted Account Attribute scalars through a JPA converter. The Pricing Engine later compares the runtime value to the configured Account Attribute type and returns an account status for a mismatch.
 
 Related implementation:
 

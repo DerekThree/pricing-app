@@ -24,10 +24,10 @@ Avoid treating these layers as interchangeable. A dashboard check improves inter
 
 ## Error semantics
 
-Configuration mutations and account acceptance use HTTP errors. Pricing evaluation records outcomes:
+Pricing data mutations and account acceptance use HTTP errors. Pricing evaluation records outcomes:
 
 - malformed or structurally invalid account submissions return HTTP `400` from the Mock Account Processor;
-- a configuration-load failure stops the startup processing run and leaves input unprocessed;
+- a pricing data load failure stops the startup processing run and leaves input unprocessed;
 - expected account-resolution and Fee evaluation failures are stored as isolated account or Fee Request statuses.
 
 This separation lets one invalid account or Fee Request avoid aborting other independent work in the Pricing Batch.
@@ -42,7 +42,7 @@ Historical integrity is enforced directly and transitively:
 - names remain mutable because they do not change pricing behavior;
 - membership order changes are allowed when membership itself is unchanged.
 
-See [ADR 0001](../../../ADR/0001-use-a-date-based-pricing-plan-lifecycle.md) and [ADR 0002](../../../ADR/0002-restrict-updates-to-shared-pricing-configuration.md).
+See [ADR 0001](../../../ADR/0001-use-a-date-based-pricing-plan-lifecycle.md) and [ADR 0002](../../../ADR/0002-restrict-updates-to-shared-pricing-data.md).
 
 ## Database-specific behavior
 
@@ -55,7 +55,7 @@ Check these pairs whenever either side changes:
 - OpenAPI validation annotations and dashboard input constraints;
 - JPA column/relationship mappings and Flyway migrations;
 - database constraint names and `GlobalExceptionHandler` mappings;
-- Pricing Plan active-period filtering in `JpaPriceConfigRepository` and inclusive selection in `PrototypeRuleEngine`;
+- Pricing Plan active-period filtering in `PricingRepository` and inclusive selection in `PrototypeRuleEngine`;
 - Account Attribute type options, condition normalization, JSON scalar deserialization, and runtime engine type checks;
 - engine status/decision combinations, `BatchMapper`, OpenAPI schemas, and simulator rendering.
 

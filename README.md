@@ -32,7 +32,7 @@ There are three ways to run the app
 
 Requires **Java 21**, **Node.js/npm**, and **PostgreSQL** on port 5432 with `pricingdb` created.
 Start the Engine first to create `accountdb` and `recommendationdb` and initialize all three stores.
-Initialization reuses the Configuration Store's `spring.datasource.url`;
+Initialization reuses the Pricing Store's `spring.datasource.url`;
 `INITIALIZATION_USERNAME` and `INITIALIZATION_PASSWORD` provide the separate privileged login
 for database/login creation, Flyway migrations, and grants. Runtime logins are separate.
 The Engine provisions Mock Server's login using `ACCOUNT_STORE_MOCK_SERVER_USERNAME`
@@ -53,7 +53,7 @@ npm run dev
 cd .\pricing-backend
 $env:SPRING_DATASOURCE_URL = 'jdbc:postgresql://localhost:5432/pricingdb'
 $env:SPRING_DATASOURCE_USERNAME = 'pricinguser'
-$env:SPRING_DATASOURCE_PASSWORD = Read-Host 'Pricing database password'
+$env:SPRING_DATASOURCE_PASSWORD = Read-Host 'Pricing Store password'
 .\mvnw.cmd spring-boot:run
 ```
 
@@ -102,7 +102,7 @@ The Dashboard uses browser-visible runtime `BACKEND_API_URL=http://localhost:808
 `ACCOUNT_PROCESSOR_API_URL=http://localhost:8081` settings.
 
 PostgreSQL creates `pricingdb` and the privileged `pricinguser` login. On every startup,
-the Engine reuses the Configuration Store URL with that login to create `accountdb` and
+the Engine reuses the Pricing Store URL with that login to create `accountdb` and
 `recommendationdb`, run all three stores' Flyway migrations, and grant the separate runtime
 logins their permissions. Backend and Mock Server production Flyway are disabled.
 Set all seven passwords from `.env.example` in `.env`;
@@ -144,7 +144,7 @@ RDS manages the `pricinguser` master password in Secrets Manager. Terraform gene
 database passwords with ephemeral values and stores them through write-only secret arguments.
 Later start/stop operations retain secret versions without resupplying or rotating passwords.
 Setup applies RDS first so its managed master-secret ARN exists before planning consumers.
-RDS creates `pricingdb`. Engine reuses the Configuration Store URL with one privileged
+RDS creates `pricingdb`. Engine reuses the Pricing Store URL with one privileged
 initialization login and receives separate restricted runtime passwords through ECS Secrets
 Manager injection. It creates `accountdb`, `recommendationdb`, and login roles, runs all three
 stores' Flyway migrations, and assigns grants before readiness. Pending processing and unavailable

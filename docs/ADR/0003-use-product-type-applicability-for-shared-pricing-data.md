@@ -1,4 +1,4 @@
-# Use Product-Type Applicability for Shared Configuration
+# Use Product-Type Applicability for Shared Pricing Data
 
 ## Status
 
@@ -14,7 +14,7 @@ from the Account Attributes used by its conditions and would be redundant persis
 
 - **Keep Account Attributes and Eligibility Reasons global.**
   - **Benefits:** No new applicability data or compatibility rule.
-  - **Costs:** Product-specific configuration exposes irrelevant Attributes and pushes inapplicable data into future processor requests.
+  - **Costs:** Product-specific pricing data exposes irrelevant Attributes and pushes inapplicable data into future processor requests.
 - **Duplicate definitions for each Product Type.**
   - **Benefits:** Compatibility follows from record ownership.
   - **Costs:** Repeated definitions diverge and cannot be shared across Product Types.

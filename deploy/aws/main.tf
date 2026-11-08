@@ -883,7 +883,7 @@ resource "aws_ecs_task_definition" "engine" {
           aws_db_instance.pricing.address, aws_db_instance.pricing.port
         )
       },
-      { name = "CONFIGURATION_STORE_BACKEND_USERNAME", value = "pricingdb_backend" },
+      { name = "PRICING_STORE_BACKEND_USERNAME", value = "pricingdb_backend" },
       { name = "ACCOUNT_STORE_MOCK_SERVER_USERNAME", value = "accountdb_mock_server" },
       { name = "ACCOUNT_STORE_USERNAME", value = "accountdb_engine" },
       {
@@ -923,7 +923,7 @@ resource "aws_ecs_task_definition" "engine" {
         valueFrom = format("%s:password::", aws_secretsmanager_secret.account_password.arn)
       },
       {
-        name      = "CONFIGURATION_STORE_BACKEND_PASSWORD"
+        name      = "PRICING_STORE_BACKEND_PASSWORD"
         valueFrom = format("%s:password::", aws_secretsmanager_secret.backend_password.arn)
       },
       {

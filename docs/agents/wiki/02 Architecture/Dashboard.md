@@ -19,7 +19,7 @@ The dashboard is a React 19 client-side SPA built with React Router 7, TypeScrip
 - Pricing Plans, also used as the index route;
 - Batch Simulator.
 
-Each configuration type has a list route and a `:operation/:id?` CRUD route. The shared operations are create, view, update, and delete. List screens use `ListPage`; forms use `CrudPageTopMenu` and feature-specific fields.
+Each pricing data type has a list route and a `:operation/:id?` CRUD route. The shared operations are create, view, update, and delete. List screens use `ListPage`; forms use `CrudPageTopMenu` and feature-specific fields.
 
 ## Data flow
 
@@ -83,7 +83,7 @@ and Fee Request drafts in local state. Product selection filters Account Attribu
 Product Applicability. Every account and Fee Request receives a stable client-side identifier.
 `Send` assigns a batch UUID when needed and posts the Pricing Batch through the Mock Account Processor
 client and a React Router fetcher without navigation. Each account retains its `pricingDate`.
-Configuration, Simulator options, and Application Date operations continue using the Backend.
+Pricing data, Simulator options, and Application Date operations continue using the Backend.
 
 `Send` immediately becomes `Reset`, disabled while submission is pending. HTTP 202 displays the
 accepted `batchId` and `message`; the Simulator remains locked until `Reset`, which clears the

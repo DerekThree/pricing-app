@@ -22,12 +22,12 @@ The current project consists of two repositories:
 | Repository | Implemented responsibility |
 | --- | --- |
 | `pricing-dashboard` | React single-page administration UI and Batch Simulator UI. |
-| `pricing-backend` | Spring Boot HTTP API, Pricing Configuration persistence, simulator support APIs, and the in-process first iteration of the Pricing Engine. |
+| `pricing-backend` | Spring Boot HTTP API, pricing data persistence, simulator support APIs, and the in-process first iteration of the Pricing Engine. |
 
 ## 2. Runtime at a glance
 
 The implemented runtime has one browser application, one backend process, and one PostgreSQL
-configuration database.
+Pricing Store.
 
 ```mermaid
 flowchart TB
@@ -38,9 +38,9 @@ flowchart TB
 
     subgraph Backend process
         Controllers[OpenAPI controller adapters]
-        Services[Configuration services and validators]
+        Services[Pricing data services and validators]
         Engine[PrototypeRuleEngine]
-        Adapter[JpaPriceConfigRepository]
+        Adapter[PricingRepository]
     end
 
     DB[(PostgreSQL)]
@@ -79,7 +79,7 @@ boundary or lifecycle from the planned architecture.
 | Batch Simulator | First iteration | Browser drafts and synchronous `POST /batch` to `pricing-backend`; results return in the same response. |
 | Pricing Engine | First iteration | Transport-independent Java input/config/result records and evaluation logic, but hosted as a bean in `pricing-backend`. |
 
-## 4. Pricing Configuration administration
+## 4. Pricing data administration
 
 ### Dashboard
 
@@ -121,7 +121,7 @@ The implemented endpoint families are:
 - `/simulator/date`, `/simulator/options`;
 - `/batch`.
 
-Most configuration features follow this path:
+Most pricing data features follow this path:
 
 ```text
 React Router loader/action
@@ -157,9 +157,9 @@ The current relational model persists:
 
 Important database-enforced invariants include:
 
-- globally unique codes for the main configuration records;
+- globally unique codes for the main pricing data records;
 - one Region per Branch, per ZIP code, and per state at the corresponding membership tier;
-- foreign keys for configuration relationships and restrictive deletion of referenced shared data;
+- foreign keys for pricing data relationships and restrictive deletion of referenced shared data;
 - one occurrence of a Fee per Pricing Plan and one occurrence of an Eligibility Reason per Pricing
   Plan Fee;
 - unique Product Type membership for each Fee and Account Attribute;
@@ -170,7 +170,7 @@ Important database-enforced invariants include:
 Services perform reference-aware checks to return descriptive errors, while foreign keys and named
 constraints remain the final integrity and concurrency boundary.
 
-## 6. Lifecycle and shared-configuration protection
+## 6. Lifecycle and shared-pricing-data protection
 
 The process-local Application Date classifies each Pricing Plan:
 
@@ -180,7 +180,7 @@ The process-local Application Date classifies each Pricing Plan:
 | Active | Only Plan Name and Active Through may change; Active Through cannot be moved before the Application Date; deletion is rejected. |
 | Past | Only Plan Name may change; deletion is allowed. |
 
-The backend also prevents indirect changes through shared configuration:
+The backend also prevents indirect changes through shared pricing data:
 
 - once a Pricing Plan contains a Fee, its code, type, and Product Applicability are locked; its name
   remains mutable;
@@ -191,8 +191,8 @@ The backend also prevents indirect changes through shared configuration:
 
 Membership order is not treated as a definition change. These rules implement
 [ADR 0001](ADR/0001-use-a-date-based-pricing-plan-lifecycle.md),
-[ADR 0002](ADR/0002-restrict-updates-to-shared-pricing-configuration.md), and
-[ADR 0003](ADR/0003-use-product-type-applicability-for-shared-configuration.md).
+[ADR 0002](ADR/0002-restrict-updates-to-shared-pricing-data.md), and
+[ADR 0003](ADR/0003-use-product-type-applicability-for-shared-pricing-data.md).
 
 Eligibility Reason Product Applicability is not stored. It is the intersection of the Product Types
 of all Account Attributes used by the Reason's conditions. A Reason without conditions applies to
@@ -200,7 +200,7 @@ all Product Types.
 
 ## 7. Batch Simulator: implemented first iteration
 
-The current Simulator page loads its Application Date and configuration choices from the backend. It
+The current Simulator page loads its Application Date and pricing data choices from the backend. It
 keeps account and Fee Request drafts in React state, filters Account Attributes and Fees by the
 selected Product's Product Type, and renders type-appropriate Account Attribute inputs.
 
@@ -241,13 +241,13 @@ back to the OpenAPI response.
 
 [PrototypeRuleEngine.java](../pricing-backend/src/main/java/com/pricing/engine/PrototypeRuleEngine.java)
 implements the current evaluation behavior. For one invocation it collects the distinct submitted
-Pricing Dates and calls the engine-owned `PriceConfigRepository` once.
-[JpaPriceConfigRepository.java](../pricing-backend/src/main/java/com/pricing/backend/batch/JpaPriceConfigRepository.java)
-loads one immutable configuration view in a read-only `REPEATABLE_READ` transaction. PostgreSQL/JPA
+Pricing Dates and calls the engine-owned `PricingRepository` once.
+[PricingRepository.java](../pricing-engine/src/main/java/com/pricing/engine/pricingStore/PricingRepository.java)
+loads one immutable pricing data view in a read-only `REPEATABLE_READ` transaction. PostgreSQL/JPA
 filters Pricing Plans that are inactive on every submitted Pricing Date; Java performs the remaining
 evaluation, implementing [ADR 0004](ADR/0004-choose-pricing-engine-evaluation-location.md).
 
-Each account is then evaluated independently against the same immutable configuration:
+Each account is then evaluated independently against the same immutable pricing data:
 
 1. resolve the Branch by exact code;
 2. resolve the Region by Branch membership, then ZIP code, then state;
@@ -278,9 +278,9 @@ Validation is intentionally layered:
 | Database | Referential, uniqueness, range, and concurrency-safe invariants. |
 | Pricing Engine statuses | Expected per-account and per-Fee Request evaluation outcomes. |
 
-Configuration mutations use HTTP errors. Malformed or structurally invalid Pricing Batches return
-`400`. Missing configuration records return `404`. Duplicate, referenced, or relationship conflicts
-normally return `409`. A Pricing Configuration load failure during evaluation returns `503`.
+Pricing data mutations use HTTP errors. Malformed or structurally invalid Pricing Batches return
+`400`. Missing pricing data records return `404`. Duplicate, referenced, or relationship conflicts
+normally return `409`. A pricing data load failure during evaluation returns `503`.
 Unexpected failures return `500`. Error responses use `ErrorResponse.message`.
 
 Expected account-resolution and Fee-evaluation failures do not reject the whole batch. `POST /batch`
@@ -291,14 +291,14 @@ returns `200` with account or Fee statuses such as `BRANCH_NOT_FOUND`, `PLAN_NOT
 
 The backend currently contains:
 
-- focused Pricing Engine behavior tests using in-memory configuration;
+- focused Pricing Engine behavior tests using in-memory pricing data;
 - Spring Boot/MockMvc API and persistence tests using H2 in PostgreSQL compatibility mode;
 - Testcontainers PostgreSQL tests for migrations, active-period exclusion, candidate-plan filtering,
   query shape, and the `REPEATABLE_READ` snapshot;
 - served-OpenAPI alignment coverage.
 
 The dashboard currently contains TypeScript typechecking and Playwright browser tests. The Playwright
-suite intercepts backend HTTP calls and covers configuration forms, Product Applicability, Simulator
+suite intercepts backend HTTP calls and covers pricing data forms, Product Applicability, Simulator
 draft composition, identifier-based result correlation, and error recovery without requiring the
 live backend.
 
@@ -341,7 +341,7 @@ evidence, not evidence that the current synchronous runtime implements them.
 - Database migrations: [pricing-backend/src/main/resources/db](../pricing-backend/src/main/resources/db)
 - Backend boot and wiring: [BackendApplication.java](../pricing-backend/src/main/java/com/pricing/backend/BackendApplication.java)
 - Batch HTTP adapter: [BatchController.java](../pricing-backend/src/main/java/com/pricing/backend/batch/BatchController.java)
-- Configuration snapshot adapter: [JpaPriceConfigRepository.java](../pricing-backend/src/main/java/com/pricing/backend/batch/JpaPriceConfigRepository.java)
+- Pricing data adapter: [PricingRepository.java](../pricing-engine/src/main/java/com/pricing/engine/pricingStore/PricingRepository.java)
 - Pricing Engine: [PrototypeRuleEngine.java](../pricing-backend/src/main/java/com/pricing/engine/PrototypeRuleEngine.java)
 - Dashboard route map: [routes.ts](../pricing-dashboard/app/routes.ts)
 - Simulator UI: [simulator/index.tsx](../pricing-dashboard/app/routes/simulator/index.tsx)

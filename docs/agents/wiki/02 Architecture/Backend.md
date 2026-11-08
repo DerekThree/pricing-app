@@ -22,9 +22,9 @@ Endpoint families are:
 
 See [[02 Architecture/API Contract]] before changing any endpoint or payload.
 
-## Configuration feature shape
+## Pricing data feature shape
 
-Most configuration packages use the same roles:
+Most pricing data packages use the same roles:
 
 | Role | Responsibility |
 |---|---|
@@ -39,7 +39,7 @@ Use an existing neighboring package as the implementation pattern. Pricing Plans
 
 ## Persistence model
 
-The Engine owns configuration-store initialization and Flyway execution. Migrations under
+The Engine owns Pricing Store initialization and Flyway execution. Migrations under
 [db/migration](../../../../pricing-engine/src/main/resources/db/migration/) are shared by
 H2-compatible tests and PostgreSQL. PostgreSQL-only constraints and runtime grants live under
 [db/postgresql](../../../../pricing-engine/src/main/resources/db/postgresql/).
@@ -47,13 +47,13 @@ Backend production Flyway is disabled; its tests load the Engine's versioned mig
 Runtime Hibernate uses `ddl-auto=validate`.
 
 The Engine connects to an existing PostgreSQL database through `INITIALIZATION_URL`, using
-`INITIALIZATION_USERNAME` and `INITIALIZATION_PASSWORD`, to create the configuration and Account
+`INITIALIZATION_USERNAME` and `INITIALIZATION_PASSWORD`, to create the Pricing Store and Account
 Store databases and runtime logins outside a transaction. The same privileged login runs
-configuration, Account Store, and Recommendation Store migrations. Runtime datasource credentials
+Pricing Store, Account Store, and Recommendation Store migrations. Runtime datasource credentials
 remain separate.
-`CONFIGURATION_STORE_BACKEND_USERNAME` and `CONFIGURATION_STORE_BACKEND_PASSWORD` configure the
+`PRICING_STORE_BACKEND_USERNAME` and `PRICING_STORE_BACKEND_PASSWORD` configure the
 Backend login to provision; Backend uses matching `SPRING_DATASOURCE_USERNAME` and
-`SPRING_DATASOURCE_PASSWORD`. Backend defaults to `pricingdb_backend` with configuration CRUD
+`SPRING_DATASOURCE_PASSWORD`. Backend defaults to `pricingdb_backend` with pricing data CRUD
 and sequence access; Engine defaults to `pricingdb_engine` with SELECT on the 15 business tables.
 Neither runtime login owns the schema or can run migrations.
 
@@ -83,8 +83,8 @@ The current schema is defined by migrations. The root `DB Schema.txt` is histori
 
 ## Pricing Engine boundary
 
-The standalone `pricing-engine/` server owns evaluation and configuration snapshot reads. Backend
-configuration CRUD remains here; configuration-schema migrations belong to the Engine.
+The standalone `pricing-engine/` server owns evaluation and pricing data snapshot reads. Backend
+pricing data CRUD remains here; Pricing Store migrations belong to the Engine.
 The synchronous batch endpoint, its contract operation, and engine-dependent wiring have been
 removed. The engine independently reads accounts and persists transaction recommendations using
 JPA repositories and separate local store transactions.
@@ -92,11 +92,11 @@ JPA repositories and separate local store transactions.
 The engine owns transport- and JPA-independent records:
 
 - [RuleEngineBatch.java](../../../../pricing-engine/src/main/java/com/pricing/engine/RuleEngineBatch.java) for input;
-- [PriceConfig.java](../../../../pricing-engine/src/main/java/com/pricing/engine/PriceConfig.java) for immutable configuration;
+- [Pricing.java](../../../../pricing-engine/src/main/java/com/pricing/engine/ruleEngine/Pricing.java) for immutable pricing data;
 - [RuleEngineBatchResult.java](../../../../pricing-engine/src/main/java/com/pricing/engine/RuleEngineBatchResult.java) for statuses and Pricing Decisions;
 - [PrototypeRuleEngine.java](../../../../pricing-engine/src/main/java/com/pricing/engine/PrototypeRuleEngine.java) as the implementation.
 
-`JpaPriceConfigRepository` loads the engine's immutable pricing configuration. It filters candidate
+`PricingRepository` loads the engine's immutable pricing data. It filters candidate
 Pricing Plans in SQL by submitted Pricing Dates, then Java performs exact Region and Pricing Plan
 selection, validation, typed comparison, waiver evaluation, and amount calculation.
 
@@ -109,7 +109,7 @@ selection, validation, typed comparison, waiver evaluation, and amount calculati
 | Contract/Jakarta validation, malformed input, domain argument rule | `400` |
 | Missing record | `404` |
 | Duplicate code, record in use, relationship conflict | `409` |
-| Pricing Configuration load failure | `503` |
+| Pricing data load failure | `503` |
 | Unexpected exception | `500` |
 
 Database constraint names are part of error mapping. A migration that renames a recognized constraint can silently change the user-facing response unless the handler and tests change with it.
@@ -121,9 +121,9 @@ Database constraint names are part of error mapping. A migration that renames a 
 ## Test layers
 
 - In `pricing-engine/`, moved `PrototypeRuleEngineTests` cover in-memory evaluation and moved
-  `JpaPriceConfigRepositoryTests` cover configuration snapshots against H2 and server startup.
-- Spring Boot and MockMvc API tests exercise contracts, services, JPA mappings, errors, and end-to-end configuration behavior against H2 in PostgreSQL compatibility mode.
-- Testcontainers PostgreSQL tests cover exclusion constraints, PostgreSQL migrations, configuration filtering, query shape, and `REPEATABLE_READ` snapshot behavior.
+  `PricingRepositoryH2Tests` cover pricing data snapshots against H2 and server startup.
+- Spring Boot and MockMvc API tests exercise contracts, services, JPA mappings, errors, and end-to-end pricing data behavior against H2 in PostgreSQL compatibility mode.
+- Testcontainers PostgreSQL tests cover exclusion constraints, PostgreSQL migrations, pricing data filtering, query shape, and `REPEATABLE_READ` snapshot behavior.
 - `OpenApiContractAlignmentTests` checks the served contract boundary.
 
 See [[05 Reference/Validation and Integrity]] for validation ownership and [[04 Change Guides/Implement a Feature or Change]] for change impact.
