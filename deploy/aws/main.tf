@@ -194,15 +194,14 @@ resource "aws_security_group" "database" {
   description = "Security group for Pricing App PostgreSQL RDS"
   vpc_id      = aws_vpc.pricing.id
   ingress {
-    description = "Allow PostgreSQL from Pricing App services and database initialization"
+    description = "Allow PostgreSQL from Pricing App services"
     from_port   = 5432
     to_port     = 5432
     protocol    = "tcp"
     security_groups = [
       aws_security_group.backend.id,
       aws_security_group.account_processor.id,
-      aws_security_group.engine.id,
-      aws_security_group.database_init.id
+      aws_security_group.engine.id
     ]
   }
   egress {
@@ -219,11 +218,22 @@ resource "aws_db_subnet_group" "pricing" {
 }
 ephemeral "random_password" "database" {
   for_each = toset([
-    "account", "recommendation", "pricingdb_engine", "accountdb_engine",
+    "backend", "account", "recommendation", "pricingdb_engine", "accountdb_engine",
     "recommendationdb_engine", "recommendationdb_txn_processor"
   ])
   length  = 32
   special = false
+}
+resource "aws_secretsmanager_secret" "backend_password" {
+  name                    = "pricing-app/backend-password"
+  recovery_window_in_days = 0
+}
+resource "aws_secretsmanager_secret_version" "backend_password" {
+  secret_id = aws_secretsmanager_secret.backend_password.id
+  secret_string_wo = jsonencode({
+    password = ephemeral.random_password.database["backend"].result
+  })
+  secret_string_wo_version = 1
 }
 resource "aws_secretsmanager_secret" "pricingdb_engine_password" {
   name                    = "pricing-app/pricingdb-engine-password"
@@ -348,6 +358,7 @@ resource "aws_iam_role_policy" "execution_secret" {
       Action = "secretsmanager:GetSecretValue"
       Resource = [
         aws_db_instance.pricing.master_user_secret[0].secret_arn,
+        aws_secretsmanager_secret.backend_password.arn,
         aws_secretsmanager_secret.account_password.arn,
         aws_secretsmanager_secret.recommendation_password.arn,
         aws_secretsmanager_secret.pricingdb_engine_password.arn,
@@ -463,12 +474,12 @@ resource "aws_ecs_task_definition" "backend" {
       name          = "main-8080-tcp"
     }]
     environment = [
-      { name = "SPRING_DATASOURCE_USERNAME", value = aws_db_instance.pricing.username },
+      { name = "SPRING_DATASOURCE_USERNAME", value = "pricingdb_backend" },
       { name = "SPRING_DATASOURCE_URL", value = format("jdbc:postgresql://%s:%s/%s", aws_db_instance.pricing.address, aws_db_instance.pricing.port, aws_db_instance.pricing.db_name) }
     ]
     secrets = [{
       name      = "SPRING_DATASOURCE_PASSWORD"
-      valueFrom = format("%s:password::", aws_db_instance.pricing.master_user_secret[0].secret_arn)
+      valueFrom = format("%s:password::", aws_secretsmanager_secret.backend_password.arn)
     }]
     healthCheck = {
       command     = ["CMD", "curl", "--fail", "--silent", "http://localhost:8080/actuator/health"]
@@ -529,6 +540,7 @@ resource "aws_ecs_task_definition" "dashboard" {
   }])
 }
 resource "aws_ecs_service" "backend" {
+  force_new_deployment               = true
   wait_for_steady_state              = true
   name                               = "pricing-backend-service"
   cluster                            = aws_ecs_cluster.pricing.id
@@ -563,9 +575,14 @@ resource "aws_ecs_service" "backend" {
       container_port   = 8080
     }
   }
-  depends_on = [aws_lb_listener_rule.api, aws_iam_role_policy.execution_secret]
+  depends_on = [
+    aws_lb_listener_rule.api,
+    aws_iam_role_policy.execution_secret,
+    aws_secretsmanager_secret_version.backend_password
+  ]
 }
 resource "aws_ecs_service" "dashboard" {
+  force_new_deployment               = true
   name                               = "pricing-dashboard-service"
   cluster                            = aws_ecs_cluster.pricing.id
   task_definition                    = aws_ecs_task_definition.dashboard.arn
@@ -601,17 +618,6 @@ output "alb_dns_name" {
   value = var.alb_enabled ? aws_lb.pricing[0].dns_name : null
 }
 
-resource "aws_security_group" "database_init" {
-  name        = "pricing-app-database-init-sg"
-  description = "Security group for the database initialization task"
-  vpc_id      = aws_vpc.pricing.id
-  egress {
-    from_port   = 0
-    to_port     = 0
-    protocol    = "-1"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-}
 resource "aws_secretsmanager_secret" "account_password" {
   name                    = "pricing-app/account-password"
   recovery_window_in_days = 0
@@ -642,57 +648,6 @@ resource "aws_ecr_repository" "mock_server" {
   force_delete         = true
   image_scanning_configuration { scan_on_push = false }
   encryption_configuration { encryption_type = "AES256" }
-}
-resource "aws_ecs_task_definition" "database_init" {
-  family                   = "pricing-database-init"
-  network_mode             = "awsvpc"
-  requires_compatibilities = ["FARGATE"]
-  cpu                      = "256"
-  memory                   = "512"
-  execution_role_arn       = aws_iam_role.execution.arn
-  container_definitions = jsonencode([{
-    name       = "DatabaseInit"
-    image      = "postgres:16"
-    essential  = true
-    entryPoint = ["/bin/bash", "-c"]
-    command    = [file("${path.module}/../local/init-db.sh")]
-    environment = [
-      { name = "PGHOST", value = aws_db_instance.pricing.address },
-      { name = "PGPORT", value = tostring(aws_db_instance.pricing.port) },
-      { name = "PGSSLMODE", value = "require" },
-      { name = "POSTGRES_USER", value = aws_db_instance.pricing.username },
-      { name = "POSTGRES_DB", value = aws_db_instance.pricing.db_name }
-    ]
-    secrets = [
-      {
-        name      = "PGPASSWORD"
-        valueFrom = format("%s:password::", aws_db_instance.pricing.master_user_secret[0].secret_arn)
-      },
-      {
-        name      = "ACCOUNT_PASSWORD"
-        valueFrom = format("%s:password::", aws_secretsmanager_secret.account_password.arn)
-      },
-      {
-        name      = "RECOMMENDATION_PASSWORD"
-        valueFrom = format("%s:password::", aws_secretsmanager_secret.recommendation_password.arn)
-      }
-    ]
-    logConfiguration = {
-      logDriver = "awslogs"
-      options = {
-        "awslogs-group"         = aws_cloudwatch_log_group.pricing.name
-        "awslogs-region"        = var.aws_region
-        "awslogs-stream-prefix" = "database-init"
-      }
-    }
-  }])
-  depends_on = [
-    aws_iam_role_policy.execution_secret,
-    aws_iam_role_policy_attachment.execution_base,
-    aws_secretsmanager_secret_version.account_password,
-    aws_secretsmanager_secret_version.recommendation_password,
-    aws_route_table_association.public
-  ]
 }
 resource "aws_lb_target_group" "mock_server" {
   name        = "pricing-mock-server-tg"
@@ -743,7 +698,7 @@ resource "aws_ecs_task_definition" "mock_server" {
       name          = "main-8081-tcp"
     }]
     environment = [
-      { name = "SPRING_DATASOURCE_USERNAME", value = "accountuser" },
+      { name = "SPRING_DATASOURCE_USERNAME", value = "accountdb_mock_server" },
       {
         name = "ENGINE_WAKE_UP_URL"
         value = format(
@@ -783,6 +738,7 @@ resource "aws_ecs_task_definition" "mock_server" {
   }])
 }
 resource "aws_ecs_service" "mock_server" {
+  force_new_deployment               = true
   wait_for_steady_state              = true
   name                               = "pricing-mock-server-service"
   cluster                            = aws_ecs_cluster.pricing.id
@@ -825,14 +781,6 @@ resource "aws_ecs_service" "mock_server" {
     aws_iam_role_policy_attachment.execution_base
   ]
 }
-output "database_init" {
-  value = {
-    task_definition = aws_ecs_task_definition.database_init.arn
-    subnet          = aws_subnet.public["a"].id
-    security_group  = aws_security_group.database_init.id
-  }
-}
-
 # Engine and mock processor wake-ups use private task addresses.
 resource "aws_security_group" "account_processor" {
   name        = "Account Processor"
@@ -926,7 +874,8 @@ resource "aws_ecs_task_definition" "engine" {
       name          = "main-8082-tcp"
     }]
     environment = [
-      { name = "SPRING_DATASOURCE_USERNAME", value = aws_db_instance.pricing.username },
+      { name = "INITIALIZATION_USERNAME", value = aws_db_instance.pricing.username },
+      { name = "SPRING_DATASOURCE_USERNAME", value = "pricingdb_engine" },
       {
         name = "SPRING_DATASOURCE_URL"
         value = format(
@@ -934,7 +883,9 @@ resource "aws_ecs_task_definition" "engine" {
           aws_db_instance.pricing.address, aws_db_instance.pricing.port
         )
       },
-      { name = "ACCOUNT_STORE_USERNAME", value = "accountuser" },
+      { name = "CONFIGURATION_STORE_BACKEND_USERNAME", value = "pricingdb_backend" },
+      { name = "ACCOUNT_STORE_MOCK_SERVER_USERNAME", value = "accountdb_mock_server" },
+      { name = "ACCOUNT_STORE_USERNAME", value = "accountdb_engine" },
       {
         name = "ACCOUNT_STORE_URL"
         value = format(
@@ -942,7 +893,11 @@ resource "aws_ecs_task_definition" "engine" {
           aws_db_instance.pricing.address, aws_db_instance.pricing.port
         )
       },
-      { name = "RECOMMENDATION_STORE_USERNAME", value = "recommendationuser" },
+      { name = "RECOMMENDATION_STORE_USERNAME", value = "recommendationdb_engine" },
+      {
+        name  = "RECOMMENDATION_STORE_TXN_PROCESSOR_USERNAME"
+        value = "recommendationdb_txn_processor"
+      },
       {
         name = "RECOMMENDATION_STORE_URL"
         value = format(
@@ -960,33 +915,33 @@ resource "aws_ecs_task_definition" "engine" {
     ]
     secrets = [
       {
-        name      = "SPRING_DATASOURCE_PASSWORD"
+        name      = "INITIALIZATION_PASSWORD"
         valueFrom = format("%s:password::", aws_db_instance.pricing.master_user_secret[0].secret_arn)
       },
       {
-        name      = "ACCOUNT_STORE_PASSWORD"
+        name      = "ACCOUNT_STORE_MOCK_SERVER_PASSWORD"
         valueFrom = format("%s:password::", aws_secretsmanager_secret.account_password.arn)
       },
       {
-        name      = "RECOMMENDATION_STORE_PASSWORD"
-        valueFrom = format("%s:password::", aws_secretsmanager_secret.recommendation_password.arn)
+        name      = "CONFIGURATION_STORE_BACKEND_PASSWORD"
+        valueFrom = format("%s:password::", aws_secretsmanager_secret.backend_password.arn)
       },
       {
-        name      = "PRICINGDB_ENGINE_PASSWORD"
+        name      = "SPRING_DATASOURCE_PASSWORD"
         valueFrom = format("%s:password::", aws_secretsmanager_secret.pricingdb_engine_password.arn)
       },
       {
-        name      = "ACCOUNTDB_ENGINE_PASSWORD"
+        name      = "ACCOUNT_STORE_PASSWORD"
         valueFrom = format("%s:password::", aws_secretsmanager_secret.accountdb_engine_password.arn)
       },
       {
-        name = "RECOMMENDATIONDB_ENGINE_PASSWORD"
+        name = "RECOMMENDATION_STORE_PASSWORD"
         valueFrom = format(
           "%s:password::", aws_secretsmanager_secret.recommendationdb_engine_password.arn
         )
       },
       {
-        name = "RECOMMENDATIONDB_TXN_PROCESSOR_PASSWORD"
+        name = "RECOMMENDATION_STORE_TXN_PROCESSOR_PASSWORD"
         valueFrom = format(
           "%s:password::", aws_secretsmanager_secret.recommendationdb_txn_processor_password.arn
         )
@@ -1013,6 +968,7 @@ resource "aws_ecs_task_definition" "engine" {
   }])
 }
 resource "aws_ecs_service" "engine" {
+  force_new_deployment               = true
   wait_for_steady_state              = true
   name                               = "pricing-engine-service"
   cluster                            = aws_ecs_cluster.pricing.id
@@ -1038,14 +994,15 @@ resource "aws_ecs_service" "engine" {
     registry_arn = aws_service_discovery_service.processing["engine"].arn
   }
   depends_on = [
-    aws_ecs_service.backend,
-    aws_ecs_service.mock_server,
+    aws_secretsmanager_secret_version.backend_password,
+    aws_secretsmanager_secret_version.account_password,
     aws_secretsmanager_secret_version.recommendation_password,
     aws_secretsmanager_secret_version.pricingdb_engine_password,
     aws_secretsmanager_secret_version.accountdb_engine_password,
     aws_secretsmanager_secret_version.recommendationdb_engine_password,
     aws_secretsmanager_secret_version.recommendationdb_txn_processor_password,
     aws_iam_role_policy.execution_secret,
-    aws_iam_role_policy_attachment.execution_base
+    aws_iam_role_policy_attachment.execution_base,
+    aws_route_table_association.public
   ]
 }

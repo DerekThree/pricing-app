@@ -30,9 +30,10 @@ There are three ways to run the app
 
 ### Local without Docker
 
-Requires **Java 21**, **Node.js/npm**, and **PostgreSQL** on port 5432. Start the Engine first to
-initialize `pricingdb` and `accountdb`. Its shared `INITIALIZATION_URL` points to an existing
-database; `INITIALIZATION_USERNAME` and `INITIALIZATION_PASSWORD` provide the privileged login
+Requires **Java 21**, **Node.js/npm**, and **PostgreSQL** on port 5432 with `pricingdb` created.
+Start the Engine first to create `accountdb` and `recommendationdb` and initialize all three stores.
+Initialization reuses the Configuration Store's `spring.datasource.url`;
+`INITIALIZATION_USERNAME` and `INITIALIZATION_PASSWORD` provide the separate privileged login
 for database/login creation, Flyway migrations, and grants. Runtime logins are separate.
 The Engine provisions Mock Server's login using `ACCOUNT_STORE_MOCK_SERVER_USERNAME`
 (default `accountdb_mock_server`) and `ACCOUNT_STORE_MOCK_SERVER_PASSWORD`; Mock Server uses
@@ -100,11 +101,12 @@ Mock Processor at **http://localhost:8081**. PostgreSQL exposes port **5432**.
 The Dashboard uses browser-visible runtime `BACKEND_API_URL=http://localhost:8080` and
 `ACCOUNT_PROCESSOR_API_URL=http://localhost:8081` settings.
 
-PostgreSQL creates `pricingdb`/`pricinguser`. `deploy/local/init-db.sh` creates
-`accountdb`/`accountuser` in the same container. The Engine owns configuration and Account Store
-Flyway migrations; Backend and Mock Server production Flyway are disabled. Local provisioning
-and startup ordering changes are tracked in ticket 06 of `.scratch/aws-postgresql-automation/`.
-The initialization script runs automatically only when the PostgreSQL data volume is empty.
+PostgreSQL creates `pricingdb` and the privileged `pricinguser` login. On every startup,
+the Engine reuses the Configuration Store URL with that login to create `accountdb` and
+`recommendationdb`, run all three stores' Flyway migrations, and grant the separate runtime
+logins their permissions. Backend and Mock Server production Flyway are disabled.
+Set all seven passwords from `.env.example` in `.env`;
+only `POSTGRES_PASSWORD` belongs to the privileged initialization login.
 To discard local database data and initialize again:
 
 ```powershell
@@ -112,9 +114,12 @@ docker compose --env-file deploy/local/.env -f deploy/local/compose.yaml down --
 docker compose --env-file deploy/local/.env -f deploy/local/compose.yaml up --build
 ```
 
-Both Java applications expose `/actuator/health`, including database connectivity, without
-internal details. Compose waits for PostgreSQL initialization before starting the Java services
-and waits for their health checks before starting the Dashboard.
+Backend and Mock Server expose `/actuator/health`, including database connectivity, without
+internal details. Compose starts the Engine after PostgreSQL is healthy, then waits for its
+`/openapi.yaml` readiness before starting the other application services. Initialization failure
+leaves dependent services stopped and database changes in place for a corrected rerun. Pending
+processing and downstream availability do not block Engine readiness. The Dashboard also waits
+for Backend and Mock Server health checks.
 Shell scripts use LF line endings through `.gitattributes`.
 
 ### AWS
@@ -126,24 +131,26 @@ Requires **AWS CLI**, **Terraform**, and **Docker Desktop**.
 ```
 
 Terraform configuration lives in `deploy/aws/`; S3 state configuration lives in
-`deploy/aws/bootstrap/`. The script prepares RDS, ECR, and a database initialization task,
-builds and pushes the three application images, and runs the initialization task on Fargate.
-The task runs `deploy/local/init-db.sh` using `psql` against the existing RDS instance.
-ECS injects the RDS and Account Store passwords from Secrets Manager. The local PostgreSQL
-container and its automatic initialization hook are not deployed to AWS.
-
-The script waits for the task to stop, checks its container exit code, then applies the started
-configuration for all three ECS services and the ALB. A stopped task is successful only when its
-container exit code is zero. Task logs are in the `database-init` stream prefix of `/ecs/pricing-app`.
+`deploy/aws/bootstrap/`. Start returns without changes when the application is already running.
+Otherwise, it prepares RDS, infrastructure and credentials, then builds and pushes all four
+application images while preserving existing service counts. It starts Engine and checks
+the expected task revision is healthy through `/openapi.yaml` before starting other stopped
+application services. If initialization fails, resources and previously running services are
+retained; an Engine newly started by this invocation is stopped. Correct the failure and run
+Start again; the script does not correct configuration or roll back schemas. Engine logs use
+the `engine` stream prefix in `/ecs/pricing-app`.
 
 RDS manages the `pricinguser` master password in Secrets Manager. Terraform generates other
 database passwords with ephemeral values and stores them through write-only secret arguments.
 Later start/stop operations retain secret versions without resupplying or rotating passwords.
 Setup applies RDS first so its managed master-secret ARN exists before planning consumers.
-The database initialization task reads its credentials through ECS Secrets Manager injection.
-It synchronizes existing Account and Recommendation login passwords with those secrets.
+RDS creates `pricingdb`. Engine reuses the Configuration Store URL with one privileged
+initialization login and receives separate restricted runtime passwords through ECS Secrets
+Manager injection. It creates `accountdb`, `recommendationdb`, and login roles, runs all three
+stores' Flyway migrations, and assigns grants before readiness. Pending processing and unavailable
+downstream services do not block initialization readiness.
 
-Open the web address printed by the script. Stop drains all three application services before
+Open the web address printed by the script. Stop drains all four application services before
 stopping the single RDS instance. Destroy removes the managed application infrastructure and data;
 the state bucket remains separately managed.
 
@@ -170,25 +177,23 @@ for one RDS PostgreSQL instance. The existing ALB HTTP allowlist is retained.
 - The general `/api/*` rule sends Backend requests to `pricing-backend-tg` on port 8080
   with priority 2.
 - Other requests go to `pricing-dashboard-tg` on port 5173.
-- Both Java target groups and ECS container health checks use `/actuator/health`.
+- Backend and Mock Server use `/actuator/health`; Engine container readiness uses `/openapi.yaml`.
 - Each application has its own security group. RDS permits PostgreSQL connections from
-  the Backend, Mock Processor, and database initialization task security groups.
+  the Backend, Mock Processor, and Engine security groups.
 
 ### Containers and database initialization
 
-- ECR repositories: `pricing-backend`, `pricing-dashboard`, and `pricing-mock-server`.
+- ECR repositories: `pricing-backend`, `pricing-dashboard`, `pricing-mock-server`, and `pricing-engine`.
 - ECS cluster: `pricing-app-cluster`, with a Fargate task definition and service for each application.
-- One-off Fargate task: `pricing-database-init`, using the PostgreSQL client to create
-  `accountuser` and `accountdb` when they do not already exist.
-- RDS instance: `pricing-app-db`, hosting `pricingdb` and `accountdb` with separate logins/passwords.
-- The Engine owns configuration and Account Store Flyway migrations; Backend and Mock Server
-  production Flyway are disabled. AWS startup ordering changes are tracked in ticket 07 of
-  `.scratch/aws-postgresql-automation/`.
-- CloudWatch log group: `/ecs/pricing-app`, with application and `database-init` stream prefixes.
+- RDS instance: `pricing-app-db`, hosting `pricingdb`, `accountdb`, and `recommendationdb`.
+- RDS creates `pricingdb`; Engine owns creation of `accountdb`, `recommendationdb`, and login roles,
+  all three stores' Flyway migrations, and grants. Backend and Mock Server production Flyway
+  are disabled.
+- CloudWatch log group: `/ecs/pricing-app`, with application stream prefixes including `engine`.
 
 ### Credentials and state
 
-- RDS creates and manages its master secret. Terraform manages the Account and Recommendation
+- RDS creates and manages its master secret. Terraform manages the Backend, Account and Recommendation
   passwords and the four Engine/transaction-processor role secrets in Secrets Manager.
 - The ECS execution role reads these secrets and injects the required password into each container.
 - Terraform 1.11+ and the AWS and Random providers support ephemeral password generation and

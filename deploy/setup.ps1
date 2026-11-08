@@ -209,7 +209,11 @@ function Build-LocalImages {
     Invoke-Native docker @('info') -Capture | Out-Null
     Copy-Repositories
     foreach ($name in $RepoNames) {
-        $buildContext = if ($name -eq 'pricing-engine') { $Root } else { Join-Path $Root $name }
+        $buildContext = if ($name -in @('pricing-backend', 'pricing-mock-server', 'pricing-engine')) {
+            $Root
+        } else {
+            Join-Path $Root $name
+        }
         Invoke-Native docker @(
             'build', '--platform', 'linux/amd64', '-t', "$($name):latest",
             '-f', (Join-Path $Root "$name/Dockerfile"), $buildContext
@@ -249,12 +253,12 @@ function Start-Local {
     Build-LocalImages
     Invoke-Native docker @('compose', 'version') -Capture | Out-Null
     $envPath = Join-Path $Local '.env'
+    $credentialKeys = @(
+        'POSTGRES_PASSWORD', 'BACKEND_PASSWORD', 'ENGINE_PASSWORD', 'ACCOUNT_PASSWORD',
+        'MOCK_SERVER_PASSWORD', 'RECOMMENDATION_PASSWORD', 'TXN_PROCESSOR_PASSWORD'
+    )
     if (-not (Test-Path -LiteralPath $envPath)) {
-        $lines = @(
-            "POSTGRES_PASSWORD=$(New-Password)"
-            "ACCOUNT_PASSWORD=$(New-Password)"
-            "RECOMMENDATION_PASSWORD=$(New-Password)"
-        )
+        $lines = $credentialKeys | ForEach-Object { "$_=$(New-Password)" }
         # CreateNew preserves an existing password even if another process creates the file.
         $stream = [IO.File]::Open($envPath, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write)
         try {
@@ -268,7 +272,7 @@ function Start-Local {
         Write-Host "Database credentials saved to $envPath"
     }
     $environment = Get-Content -LiteralPath $envPath
-    foreach ($key in @('POSTGRES_PASSWORD', 'ACCOUNT_PASSWORD', 'RECOMMENDATION_PASSWORD')) {
+    foreach ($key in $credentialKeys) {
         if (-not ($environment -match "^\s*$key\s*=\s*\S+")) {
             throw "$envPath must contain a nonempty $key."
         }
@@ -363,44 +367,47 @@ function Push-Images {
     }
 }
 
-function Initialize-AwsDatabase {
-    $configuration = Invoke-Native terraform @(
-        "-chdir=$Infra", 'output', '-json', 'database_init'
-    ) -Capture | ConvertFrom-Json
-    $network = 'awsvpcConfiguration={subnets=[' + $configuration.subnet +
-        '],securityGroups=[' + $configuration.security_group + '],assignPublicIp=ENABLED}'
-    $response = Get-AwsJson @(
-        'ecs', 'run-task', '--cluster', $Cluster, '--launch-type', 'FARGATE',
-        '--task-definition', $configuration.task_definition, '--network-configuration', $network
-    )
-    if (@($response.failures).Count -gt 0 -or -not $response.tasks[0].taskArn) {
-        throw "Database initialization could not start: $($response.failures.reason -join '; ')"
-    }
-    $taskArn = $response.tasks[0].taskArn
-    Invoke-Native aws @(
-        'ecs', 'wait', 'tasks-stopped', '--cluster', $Cluster, '--tasks', $taskArn,
-        '--region', $AwsRegion, '--no-cli-pager'
-    )
-    $result = Get-AwsJson @('ecs', 'describe-tasks', '--cluster', $Cluster, '--tasks', $taskArn)
-    $container = $result.tasks[0].containers | Where-Object { $_.name -eq 'DatabaseInit' }
-    if (@($result.failures).Count -gt 0 -or
-        $null -eq $container.exitCode -or $container.exitCode -ne 0) {
-        throw "Database initialization failed: $($result.tasks[0].stoppedReason). " +
-            "Exit code: $($container.exitCode). Check the database-init CloudWatch log."
-    }
-    Write-Host 'Account and recommendation databases initialized.'
-}
-
 function Wait-Services {
-    param([switch]$Stopped)
+    param([switch]$Stopped, [switch]$EngineOnly)
     $deadline = [DateTime]::UtcNow.AddMinutes(20)
     do {
         $status = Get-AwsStatus
         if ($Stopped) {
             $busy = @($status.Services | Where-Object {
-                $_.desiredCount -ne 0 -or $_.runningCount -ne 0 -or $_.pendingCount -ne 0
+                (-not $EngineOnly -or $_.serviceName -eq 'pricing-engine-service') -and
+                ($_.desiredCount -ne 0 -or $_.runningCount -ne 0 -or $_.pendingCount -ne 0)
             })
             if (-not $busy.Count) { return }
+        } elseif ($EngineOnly) {
+            $engine = $status.Services | Where-Object {
+                $_.serviceName -eq 'pricing-engine-service'
+            }
+            $resources = @(Get-StateResources)
+            $expected = Get-StateValue $resources 'aws_ecs_service' 'engine'
+            if ($engine.taskDefinition -ne $expected.task_definition -or
+                @($engine.deployments | Where-Object { $_.rolloutState -eq 'FAILED' }).Count) {
+                throw 'Engine initialization failed or rolled back to an unexpected task definition.'
+            }
+            if ($engine.desiredCount -ge 1 -and
+                $engine.runningCount -eq $engine.desiredCount -and $engine.pendingCount -eq 0 -and
+                @($engine.deployments).Count -eq 1 -and
+                $engine.deployments[0].rolloutState -eq 'COMPLETED') {
+                $running = Get-AwsJson @(
+                    'ecs', 'list-tasks', '--cluster', $Cluster,
+                    '--service-name', $engine.serviceName
+                )
+                if (@($running.taskArns).Count -eq $engine.desiredCount) {
+                    $tasks = Get-AwsJson (@(
+                        'ecs', 'describe-tasks', '--cluster', $Cluster, '--tasks'
+                    ) + @($running.taskArns))
+                    $healthy = @($tasks.tasks | Where-Object {
+                        $_.taskDefinitionArn -eq $expected.task_definition -and
+                        $_.lastStatus -eq 'RUNNING' -and $_.healthStatus -eq 'HEALTHY'
+                    })
+                    if (-not @($tasks.failures).Count -and
+                        $healthy.Count -eq $engine.desiredCount) { return }
+                }
+            }
         } elseif ($status.Running) {
             $resources = @(Get-StateResources)
             foreach ($name in @('backend', 'dashboard', 'mock_server', 'engine')) {
@@ -452,6 +459,14 @@ function Invoke-AwsOperation {
         $env:TF_VAR_aws_region = $AwsRegion
         switch ($Operation) {
             'Start' {
+                $serviceCounts = @{}
+                foreach ($name in @('backend', 'dashboard', 'mock_server', 'engine')) {
+                    $service = $status.Services | Where-Object {
+                        $_.serviceName -eq "pricing-$($name.Replace('_', '-'))-service"
+                    }
+                    $serviceCounts[$name] = [int]$service.desiredCount
+                }
+                $stopEngineOnFailure = $serviceCounts.engine -eq 0
                 if ($status.Database -ne 'absent') {
                     Set-RdsAvailable $status
                 }
@@ -460,21 +475,46 @@ function Invoke-AwsOperation {
                     'apply', '-var=rds_state=available', '-var=import_existing=false',
                     '-target=aws_db_instance.pricing'
                 )
-                Write-Host 'Prepare RDS, image repositories, and the database initialization task.'
-                Invoke-Terraform @(
-                    'apply', '-var=rds_state=available', '-var=import_existing=false',
-                    '-target=aws_db_instance.pricing', '-target=aws_security_group.database',
-                    '-target=aws_ecr_repository.backend', '-target=aws_ecr_repository.dashboard',
-                    '-target=aws_ecr_repository.mock_server', '-target=aws_ecs_cluster.pricing',
-                    '-target=aws_ecr_repository.engine',
-                    '-target=aws_ecs_task_definition.database_init'
-                )
+                Write-Host 'Provision infrastructure and credentials, preserving service counts.'
+                Invoke-Terraform (@(
+                    'apply', '-var=rds_state=available', '-var=alb_enabled=true',
+                    '-var=import_existing=false'
+                ) + @($serviceCounts.Keys | ForEach-Object {
+                    "-var=$($_)_desired_count=$($serviceCounts[$_])"
+                }))
                 Push-Images
-                Initialize-AwsDatabase
-                Write-Host 'Create the ALB and start all four ECS services.'
-                Invoke-Terraform @(
+                $serviceCounts.engine = [Math]::Max(1, $serviceCounts.engine)
+                try {
+                    Write-Host 'Start Engine and wait for database initialization readiness.'
+                    Invoke-Terraform (@(
+                        'apply', '-var=rds_state=available',
+                        '-var=alb_enabled=true', '-var=import_existing=false'
+                    ) + @($serviceCounts.Keys | ForEach-Object {
+                        "-var=$($_)_desired_count=$($serviceCounts[$_])"
+                    }))
+                    Wait-Services -EngineOnly
+                } catch {
+                    $failure = $_
+                    if ($stopEngineOnFailure) {
+                        try {
+                            Get-AwsJson @(
+                                'ecs', 'update-service', '--cluster', $Cluster,
+                                '--service', 'pricing-engine-service', '--desired-count', '0'
+                            ) | Out-Null
+                            Wait-Services -Stopped -EngineOnly
+                        } catch {
+                            Write-Warning "Could not confirm Engine stopped: $($_.Exception.Message)"
+                        }
+                    }
+                    throw "Engine initialization failed. Resources retained; correct and rerun. " +
+                        "Check the engine CloudWatch log. $($failure.Exception.Message)"
+                }
+                Write-Host 'Engine initialization succeeded. Start the other services.'
+                Invoke-Terraform (@(
                     'apply', '-var-file=started.tfvars', '-var=import_existing=false'
-                )
+                ) + @($serviceCounts.Keys | ForEach-Object {
+                    "-var=$($_)_desired_count=$([Math]::Max(1, $serviceCounts[$_]))"
+                }))
                 Wait-Services
                 Invoke-Terraform @('output', '-raw', 'alb_dns_name')
                 Write-Host ''
