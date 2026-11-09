@@ -369,6 +369,115 @@ resource "aws_iam_role_policy" "execution_secret" {
     }]
   })
 }
+data "aws_iam_openid_connect_provider" "github" {
+  url = "https://token.actions.githubusercontent.com"
+}
+
+resource "aws_iam_role" "github_deploy" {
+  name = "pricing-backend-github-deploy"
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect = "Allow"
+      Principal = {
+        Federated = data.aws_iam_openid_connect_provider.github.arn
+      }
+      Action = "sts:AssumeRoleWithWebIdentity"
+      Condition = {
+        StringEquals = {
+          "token.actions.githubusercontent.com:aud" = "sts.amazonaws.com"
+        }
+        StringLike = {
+          "token.actions.githubusercontent.com:sub" = [
+            "repo:DerekThree/pricing-backend:ref:refs/heads/main",
+            "repo:DerekThree/pricing-dashboard:ref:refs/heads/main",
+            "repo:DerekThree@101598035/pricing-engine@1447313065:ref:refs/heads/main",
+            "repo:DerekThree@101598035/pricing-mock-server@1428222315:ref:refs/heads/main",
+          ]
+        }
+      }
+    }]
+  })
+}
+
+resource "aws_iam_role_policy" "github_deploy_ecr" {
+  name = "PricingBackendECRPublish"
+  role = aws_iam_role.github_deploy.id
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid      = "ECRLogin"
+        Effect   = "Allow"
+        Action   = "ecr:GetAuthorizationToken"
+        Resource = "*"
+      },
+      {
+        Sid    = "PublishBackendImage"
+        Effect = "Allow"
+        Action = [
+          "ecr:BatchCheckLayerAvailability",
+          "ecr:InitiateLayerUpload",
+          "ecr:UploadLayerPart",
+          "ecr:CompleteLayerUpload",
+          "ecr:PutImage",
+          "ecr:BatchGetImage",
+        ]
+        Resource = [
+          aws_ecr_repository.backend.arn,
+          aws_ecr_repository.dashboard.arn,
+          aws_ecr_repository.engine.arn,
+          aws_ecr_repository.mock_server.arn,
+        ]
+      },
+    ]
+  })
+}
+
+resource "aws_iam_role_policy" "github_deploy_ecs" {
+  name = "PricingBackendECSDeploy"
+  role = aws_iam_role.github_deploy.id
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid    = "DeployAndMonitorBackend"
+        Effect = "Allow"
+        Action = [
+          "ecs:UpdateService",
+          "ecs:DescribeServices",
+        ]
+        Resource = [
+          aws_ecs_service.backend.arn,
+          aws_ecs_service.dashboard.arn,
+          aws_ecs_service.engine.arn,
+          aws_ecs_service.mock_server.arn,
+        ]
+      },
+      {
+        Effect   = "Allow"
+        Action   = "ecs:ListTasks"
+        Resource = "*"
+        Condition = {
+          ArnEquals = {
+            "ecs:cluster" = aws_ecs_cluster.pricing.arn
+          }
+        }
+      },
+      {
+        Effect   = "Allow"
+        Action   = "ecs:DescribeTasks"
+        Resource = "${replace(aws_ecs_cluster.pricing.arn, ":cluster/", ":task/")}/*"
+      },
+      {
+        Effect   = "Allow"
+        Action   = "ecs:DescribeTaskDefinition"
+        Resource = "*"
+      },
+    ]
+  })
+}
+
 resource "aws_ecs_cluster" "pricing" {
   name = "pricing-app-cluster"
   configuration {
