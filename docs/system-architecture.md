@@ -1,6 +1,6 @@
 # Planned Architecture
 
-Status: partially implemented; follow-on asynchronous behavior remains planned
+Status: partially implemented; parallel Pricing Engine workers are implemented, while some downstream behavior remains planned
 
 ## 1. Project purpose
 
@@ -162,15 +162,15 @@ and the immutable pricing data snapshot loader. Pricing data CRUD and Pricing St
 in `pricing-backend/`; the engine validates that existing schema without applying migrations.
 Its pricing data-read mappings do not depend on the Backend executable.
 
-Ticket 02 removes the Backend synchronous batch endpoint and adds startup processing. `PricingService` discovers unprocessed Account Outbox rows and processes the discovered set serially. JPA repositories read accounts with per-account Pricing Dates and map existing evaluator output into relational recommendation records. The recommendation batch, account outcomes, Fee Request outcomes, satisfied Eligibility Reasons, and uniquely keyed Recommendation Outbox row commit in one local transaction. A separate Account Store transaction marks source completion afterward. Recommendation migrations belong to the engine; Pricing Store and Account Store migrations retain their existing owners.
+Ticket 02 removed the Backend synchronous batch endpoint and introduced a serial startup drain. That was an earlier implementation stage, superseded by the parallel-worker design in [ADR 0008](ADR/0008-process-pricing-batches-in-parallel.md). JPA repositories read accounts with per-account Pricing Dates and map existing evaluator output into relational recommendation records. The recommendation batch, account outcomes, Fee Request outcomes, satisfied Eligibility Reasons, and uniquely keyed Recommendation Outbox row commit in one local transaction. A separate Account Store transaction marks source completion afterward. Recommendation migrations belong to the engine; Pricing Store and Account Store migrations retain their existing owners.
 
-Ticket 03 adds `POST /api/v1/work-available`, owned by the engine's OpenAPI contract.
-The payload-free request returns an empty HTTP 202 acknowledgement; it does not confirm completed
-pricing. `PricingController` delegates to `PricingService`, which shares one serial run between
-startup and wake-ups. After each discovered set, the run scans again until no work remains.
-Wake-ups during processing are discarded. Discovery and the transition to idle use the same lock
-as incoming wake-ups, so a notification overlapping the final empty scan starts a new run after
-that scan. There is no pending-wake-up queue or flag, healthy idle polling, or global FIFO order.
+Ticket 03 introduced `POST /api/v1/work-available`, owned by the engine's OpenAPI contract.
+The payload-free request returns HTTP 202 without waiting for completed pricing.
+The current `EngineController` delegates to `EngineService`, which admits concurrent workers
+up to each instance's configured cap. Startup fills available worker slots; an incoming wake-up
+starts another worker if capacity is available and is ignored at capacity. Workers keep discovering
+batches until no eligible unclaimed work remains, and worker completion releases capacity for
+coordinated discovery. There is no persistent wake-up queue, healthy idle polling, or global FIFO order.
 
 ### Asynchronous processing and recovery
 
@@ -179,39 +179,45 @@ asynchronously.
 
 The asynchronous Pricing Engine preserves the existing pricing evaluation rules.
 
-The first asynchronous version runs a single Pricing Engine instance and processes
-Pricing Batches one at a time, in series. Independent Pricing Batches may complete
-out of submission order.
+The implemented Pricing Engine processes independent Pricing Batches concurrently.
+Each instance has a configurable worker cap (`ENGINE_MAX_WORKERS`, default `3`);
+calculating workers and workers waiting through retries or recovery all count toward
+that cap. Multiple Engine instances can process different batches at the same time.
+There is no global FIFO ordering guarantee.
 
-After processing the batches returned by an outbox scan, the engine scans the
-outbox again for any new unprocessed batches that arrived during processing.
-If it finds more batches, it processes them in series and checks again after
-finishing them.
+On startup, the engine starts workers up to the instance cap. An HTTP wake-up can
+start another worker while capacity remains; wake-ups at capacity are ignored.
+Each worker repeatedly claims eligible Account Outbox rows where
+`processed = false AND error IS NULL`, using `FOR UPDATE SKIP LOCKED`.
+The claim is held in an Account Store transaction while it remains valid, so
+another worker cannot claim the same batch. Each worker continues discovering
+work until no eligible, unclaimed batches remain. Worker completion releases
+a slot and coordinates discovery and admission so overlapping completions and
+wake-ups neither exceed the cap nor strand available work.
 
-Pricing data is captured when evaluation starts, rather than when the
-Account Processor accepts the batch. Temporary infrastructure failures receive
-bounded automatic retries with delay. After retries are exhausted, the batch
-remains unprocessed.
+Pricing data is captured when evaluation starts, not when the Account Processor
+accepts the batch. Temporary database failures receive bounded retries with
+delay. After the retry limit is reached, only the affected worker checks the
+unavailable store's connectivity periodically (every five seconds by default)
+and resumes its pending operation after recovery. The worker retains its slot;
+other workers can continue processing available batches within the cap.
 
-The engine waits and retries the same batch. It does not start another Pricing
-Batch to fill that batch's retry delay.
+If a batch has been calculated but recommendation persistence fails, the worker
+retains the calculated result and retries storing that same result after database
+recovery. It does not recalculate the batch. Recommendation records and their
+outbox row commit together in the Recommendation Store. The separate Account
+Store transaction marks the source batch processed afterward; failure to update
+source completion does not invalidate committed recommendations.
 
-If calculation has completed but storing its results fails, the engine retains
-the already-calculated results. When database connectivity returns, it retries
-storing those same results. It does not discard them or recalculate the batch.
+Unexpected non-temporary evaluation failures are logged and stored in the
+Account Outbox's nullable `error` column while leaving `processed = false`.
+Errored batches remain ineligible for discovery until that error is cleared.
+If storing the error is interrupted by an Account Store outage, the affected
+worker retains the exception and its slot through recovery and rechecks batch
+eligibility before writing it if the original claim was lost.
 
-If retries are exhausted because a required database is unavailable, the engine
-stops batch processing until database connectivity is restored. It does not
-attempt the remaining batches against the unavailable database; they remain
-unprocessed.
-
-After database retries are exhausted, the engine periodically checks database
-connectivity while the database is unavailable. During this time, it does not
-start new batch processing and ignores incoming wake-up calls without storing,
-queuing, or remembering them. When connectivity is restored, the engine first
-stores any already-calculated results awaiting persistence, then performs a
-one-time outbox scan for all unprocessed Pricing Batches and processes them one
-at a time, in series.
+See [ADR 0008 — Process Pricing Batches in parallel](ADR/0008-process-pricing-batches-in-parallel.md)
+for the concurrency, transaction-claim, and recovery rules.
 
 The Account Processor persists an account batch in PostgreSQL, then sends an HTTP
 notification to the Pricing Engine indicating that new account work may be available.

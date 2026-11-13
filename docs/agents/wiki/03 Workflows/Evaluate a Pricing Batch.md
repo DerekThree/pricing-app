@@ -145,20 +145,21 @@ The charged amount is rounded to two decimal places with `HALF_UP`. A conditionl
 
 The recommendation batch retains the input `batchId`. Accounts are correlated by Account Number; Fee results are correlated by Fee Request ID. Result order is not a contract.
 
-Successful Fee Requests have status `OK` and exactly one Pricing Decision shape:
+Successful Fee Requests have one status:
 
 - `CHARGED` with `amount` and no Eligibility Reasons;
 - `WAIVED` with satisfied Eligibility Reason codes and no amount.
 
-The enum definitions are in [RuleEngineBatchResult.java](../../../../pricing-engine/src/main/java/com/pricing/engine/RuleEngineBatchResult.java), and executable examples are in [PrototypeRuleEngineTests.java](../../../../pricing-engine/src/test/java/com/pricing/engine/PrototypeRuleEngineTests.java) and [PricingPersistencePostgresTests.java](../../../../pricing-engine/src/test/java/com/pricing/engine/PricingPersistencePostgresTests.java).
+Failures use a status such as `FEE_NOT_FOUND` without a pricing amount or decision. The Recommendation Store has no separate `decision` column.
+
+The statuses are defined in [RuleEngineBatchResult.java](../../../../pricing-engine/src/main/java/com/pricing/engine/ruleEngine/RuleEngineBatchResult.java), with examples in [RuleEngineTests.java](../../../../pricing-engine/src/test/java/com/pricing/engine/RuleEngineTests.java) and [Phase4PersistencePostgresTests.java](../../../../pricing-engine/src/test/java/com/pricing/engine/engineService/Phase4PersistencePostgresTests.java).
 
 ## 7. Persist recommendations and complete the source
 
 `RecommendationMapper` maps account and Fee Request outcomes into relational JPA entities.
-`RecommendationRepository.save` uses one local transaction to persist `recommendation_batches`,
-`account_recommendations`, `fee_request_recommendations`, satisfied Eligibility Reason codes in
-`recommendation_eligibility_reasons`, and `recommendation_outbox`. The outbox batch identifier is
-its primary key and references the recommendation batch. Recommendation records do not use JSONB.
+`RecommendationRepository.save` uses one local transaction to persist `recommendation_outbox`,
+`account_recommendations`, `fee_request_recommendations`, and satisfied Eligibility Reason codes in
+`recommendation_eligibility_reasons`. The outbox batch identifier is its primary key, and account outcomes reference it. Recommendation records do not use JSONB.
 
 After that transaction commits, `AccountRepository.markProcessed` updates the Account Outbox in
 its own transaction. No transaction spans the stores. An output write failure rolls back the

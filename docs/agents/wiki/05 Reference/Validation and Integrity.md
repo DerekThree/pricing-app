@@ -57,7 +57,7 @@ Check these pairs whenever either side changes:
 - database constraint names and `GlobalExceptionHandler` mappings;
 - Pricing Plan active-period filtering in `PricingRepository` and inclusive selection in `PrototypeRuleEngine`;
 - Account Attribute type options, condition normalization, JSON scalar deserialization, and runtime engine type checks;
-- engine status/decision combinations, `BatchMapper`, OpenAPI schemas, and simulator rendering.
+- engine Fee Request status values, `RecommendationMapper`, Recommendation Store migrations, and downstream consumers.
 
 ## Primary references
 
@@ -67,4 +67,3 @@ Check these pairs whenever either side changes:
 - [EligibilityReasonValidator.java](../../../../pricing-backend/src/main/java/com/pricing/backend/eligibilityreason/EligibilityReasonValidator.java)
 - [BatchValidator.java](../../../../pricing-mock-server/src/main/java/com/pricing/mockserver/batch/BatchValidator.java)
 - [PostgreSQL active-period migration](../../../../pricing-backend/src/main/resources/db/postgresql/V17__prevent_overlapping_pricing_plan_active_periods.sql)
-

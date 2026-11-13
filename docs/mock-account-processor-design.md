@@ -40,18 +40,22 @@ boundaries remain defined in [Validations](Validations.md).
 
 | Table | Contents |
 | --- | --- |
-| Outbox | The batch table: one row per batch with `batchId` and `processed`, initially `false`; no date. |
+| Outbox | The batch table: one row per batch with `batchId`, `processed` (initially `false`), and nullable `error` for Pricing Engine evaluation failures; no date. |
 | Accounts | One row per submitted account, including its Pricing Date, associated with its batch. |
 | Account attributes | One row per submitted attribute, associated with its account. |
 | Fee requests | One row per submitted Fee Request, associated with its account. |
 
-Accounts, Account Attributes, and Fee Requests use generated bigint identity primary keys.
-Account numbers are unique within a batch. Submitted Fee Request IDs are unique within an account;
-Fee Requests do not use a composite primary key.
-Attribute codes are unique within an account, enforced by a database unique constraint on
-`(account_id, code)`.
+Account numbers must be unique within a batch. Submitted Fee Request IDs and attribute
+codes must be unique within an account. Attribute-code uniqueness is a design requirement
+but is not currently enforced by the database migrations.
 
-Persistence does not guarantee the submitted order of accounts, attributes, or fee requests.
+Every account retains its submitted Pricing Date, which can differ between accounts in a
+batch. Submitted attribute values retain their scalar type: strings map to `String`, numbers
+to `BigDecimal`, and booleans to `Boolean`, using the existing
+[scalar conversion semantics](../pricing-backend/src/main/java/com/pricing/backend/config/AccountAttributeValueDeserializer.java).
+A transaction amount may be omitted, but an explicitly null supplied amount is rejected
+by request validation before persistence. Persistence does not guarantee the submitted
+order of accounts, attributes, or fee requests.
 
 ## Notification delivery
 
@@ -63,8 +67,10 @@ consumer or retries. A `2xx` response completes delivery; other statuses, connec
 timeouts consume attempts. Connection and response-read timeouts and the delay between failed
 attempts are configurable; see the [Mock Server configuration](../pricing-mock-server/README.md).
 
-The outbox stores only `batch_id` and `processed`; neither a Pricing Date nor
-notification-delivery state is persisted in this table.
+The outbox stores `batch_id`, `processed`, and nullable `error`. The Pricing Engine writes
+`error` when a non-recoverable evaluation failure occurs; batches with an error are excluded
+from its pending-work selection. Neither a Pricing Date nor notification-delivery state is
+persisted in this table. In particular, `error` does not track HTTP wake-up failures.
 Retry failed delivery in memory up to a configured attempt limit, defaulting to three total
 attempts: one initial attempt and at most two retries. Exhausting that limit leaves
 the accepted batch stored and stops that retry sequence. On startup or restart, send a wake-up
@@ -88,55 +94,11 @@ Pricing Engine notification failure does not change an already committed submiss
 
 ## Relational schema
 
-SQL column names use snake case; API field names retain their existing camel case.
-The generated `id` primary key identifies each Account, Account Attribute, and Fee Request row.
-Submitted Account Numbers are unique within a batch; submitted Fee Request IDs are unique within
-an account; Attribute codes are unique within an account.
-
-### Outbox
-
-- `batch_id`: UUID primary key, corresponding to the submitted `batchId`.
-- `processed`: non-null boolean, initially `false`.
-
-### Accounts
-
-- `id`: generated bigint identity primary key.
-- `batch_id`: UUID foreign key to Outbox.
-- `account_number`, `product_code`, `branch_code`: strings using the existing API code limits.
-- `pricing_date`: non-null date containing this account's submitted `pricingDate`.
-- Unique constraint on `(batch_id, account_number)`.
-
-Accounts in one batch may have different Pricing Dates. Preserve each submitted date;
-do not derive it from the outbox or collapse the accounts to one batch-level date.
-
-### Account attributes
-
-- `id`: generated bigint identity primary key.
-- `account_id`: bigint foreign key to Accounts.
-- `code`: string using the existing API code limits.
-- `value`: non-null JSONB containing one string, number, or boolean scalar.
-- Unique constraint on `(account_id, code)`.
-- Check constraint: `jsonb_typeof(value) IN ('string', 'number', 'boolean')`.
-  Objects, arrays, and JSON null are rejected; the non-null constraint also rejects SQL null.
-
-Preserve the submitted scalar type using the existing
-[scalar conversion semantics](../pricing-backend/src/main/java/com/pricing/backend/config/AccountAttributeValueDeserializer.java):
-strings map to `String`, numbers to `BigDecimal`, and booleans to `Boolean`. Reading JSONB needs
-a persistence adapter; the existing deserializer handles HTTP input. No separate type column is
-needed because the JSONB value retains its scalar type.
-
-### Fee requests
-
-- `id`: generated bigint identity primary key.
-- `account_id`: bigint foreign key to Accounts.
-- `fee_request_id`: bigint corresponding to the submitted `feeRequestId`.
-- Unique constraint on `(account_id, fee_request_id)`; no composite primary key.
-- `code`: string using the existing API code limits.
-- `transaction_amount`: optional numeric value, nonnegative and in increments of `0.01`.
-
-Required request values are non-null in storage. An absent transaction amount is nullable.
-Existing request validation rejects an explicitly null supplied transaction amount before
-persistence.
+The implemented Account Store tables, columns, types, keys, constraints, indexes,
+PostgreSQL-only triggers, grants, and migration history are documented in the
+[Account Store database schema](DB%20Schemas/account-store-schema.md).
+The Flyway migrations are authoritative for database-enforced constraints;
+this design document describes intended processing behavior.
 
 ## Configuration values
 

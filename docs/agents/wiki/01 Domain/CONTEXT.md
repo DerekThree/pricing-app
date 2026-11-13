@@ -96,6 +96,10 @@ The evaluator that resolves each account's Region and Pricing Plan and produces 
 
 Use **Pricing Engine**, not “rule engine” or “fee calculator” in domain explanations. `RuleEngine` remains an implementation interface name.
 
+### Mock Transaction Processor
+
+The simulated processor responsible for delivering Pricing Engine results to the Dashboard.
+
 ### Pricing Date
 
 The date belonging to an individual account that selects the applicable Pricing Plan. Accounts in the same batch may have different Pricing Dates.
