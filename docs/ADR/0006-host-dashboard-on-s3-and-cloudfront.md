@@ -2,11 +2,12 @@
 
 ## Status
 
-Proposed
+Accepted
 
 ## Context
 
-The React Dashboard builds to static files but currently runs in an ECS Fargate container. We are considering S3 and CloudFront to reduce always-on compute costs and serve the Dashboard over HTTPS.
+The client-only React Dashboard builds to static files but runs in an ECS Fargate container.
+Static hosting provides HTTPS without a purchased domain or certificate.
 
 ## Options Considered
 
@@ -15,12 +16,23 @@ The React Dashboard builds to static files but currently runs in an ECS Fargate 
 
 ## Decision
 
-Pending.
+Serve the existing production browser build from a private S3 bucket through one CloudFront
+distribution, managed in the existing Terraform root. Block public bucket access and allow
+CloudFront reads through Origin Access Control, restricted to the distribution ARN. Use the
+AWS-assigned hostname and default certificate, redirecting viewer HTTP to HTTPS.
+
+Rewrite only Dashboard routes to the SPA entry point in a viewer-request CloudFront Function.
+Leave API paths and asset requests unchanged; do not use distribution-wide HTML error responses.
+Revalidate index.html and config.js, and cache fingerprinted assets for one year.
 
 ## Rationale
 
-Evaluate deployment simplicity, ongoing cost, and access restrictions before choosing.
+This serves static files without requiring Dashboard compute and provides a public HTTPS URL.
 
 ## Consequences
 
-If adopted, replace Dashboard ECS deployment with S3 uploads and CloudFront configuration. Backend hosting and exposure are separate decisions (ADR 0007).
+Issue 01 adds independently verifiable static hosting and a publishing function in deploy/setup.ps1.
+Existing ECS hosting and API exposure remain during this slice. Static-site same-origin API paths
+are unavailable until the API routing cutover; loading static files does not verify API access.
+Later migration issues replace Dashboard container delivery and remove its ECS hosting.
+Backend exposure is tracked separately in ADR 0007.

@@ -12,6 +12,15 @@ The dashboard is a React 19 client-side SPA built with React Router 7, TypeScrip
 
 ## Routes and screens
 
+The production browser build can also be published to a private S3 origin through CloudFront,
+using `Publish-Dashboard` in `deploy/setup.ps1`. Terraform manages the bucket, public access block,
+Origin Access Control, distribution, and a viewer-request function that rewrites Dashboard routes
+to `/index.html`. API paths and assets are not rewritten. Entry/config objects revalidate;
+fingerprinted assets cache for one year.
+See [ADR 0006](../../../ADR/0006-host-dashboard-on-s3-and-cloudfront.md).
+During the first migration slice, this hostname serves static content only: API routing is
+pending, and existing Dashboard ECS hosting remains until later migration issues.
+
 [routes.ts](../../../../pricing-dashboard/app/routes.ts) defines one shared layout and these screens:
 
 - Branches, Regions, Products, Fees;

@@ -309,6 +309,54 @@ function Invoke-Terraform {
     Invoke-Native terraform (@("-chdir=$Infra") + $Arguments)
 }
 
+function Publish-Dashboard {
+    $identity = Connect-Aws
+    $resources = @(Get-StateResources)
+    Assert-StateAccount $resources $identity.Account
+    $bucket = Get-StateValue $resources 'aws_s3_bucket' 'dashboard'
+    $distribution = Get-StateValue $resources 'aws_cloudfront_distribution' 'dashboard'
+    if (-not $bucket -or -not $distribution) {
+        throw 'Apply the Dashboard S3/CloudFront Terraform resources before publishing.'
+    }
+    $dashboard = Join-Path $Root 'pricing-dashboard'
+    Push-Location $dashboard
+    try {
+        Invoke-Native npm.cmd @('run', 'build')
+    } finally {
+        Pop-Location
+    }
+    $client = Join-Path $dashboard 'build/client'
+    # API behaviors are added in the next migration slice. These paths fail until then.
+    $config = 'window.__APP_CONFIG__ = {"BACKEND_API_URL":"","ACCOUNT_PROCESSOR_API_URL":""};'
+    Set-Content -LiteralPath (Join-Path $client 'config.js') -Value $config -Encoding UTF8
+    $destination = "s3://$($bucket.bucket)"
+    $common = @('--region', $AwsRegion, '--no-cli-pager', '--only-show-errors')
+    Invoke-Native aws (@(
+        's3', 'sync', $client, $destination,
+        '--exclude', 'assets/*', '--exclude', '*.gz',
+        '--exclude', 'index.html', '--exclude', 'config.js',
+        '--cache-control', 'public,max-age=300'
+    ) + $common)
+    Invoke-Native aws (@(
+        's3', 'sync', (Join-Path $client 'assets'), "$destination/assets",
+        '--exclude', '*.gz', '--cache-control', 'public,max-age=31536000,immutable'
+    ) + $common)
+    foreach ($entry in @(
+        @{ Name = 'config.js'; Type = 'application/javascript' },
+        @{ Name = 'index.html'; Type = 'text/html' }
+    )) {
+        Invoke-Native aws (@(
+            's3', 'cp', (Join-Path $client $entry.Name), "$destination/$($entry.Name)",
+            '--content-type', $entry.Type, '--cache-control', 'no-cache,max-age=0,must-revalidate'
+        ) + $common)
+    }
+    Invoke-Native aws @(
+        'cloudfront', 'create-invalidation', '--distribution-id', $distribution.id,
+        '--paths', '/*', '--region', $AwsRegion, '--no-cli-pager'
+    )
+    Write-Host "Dashboard: https://$($distribution.domain_name) (API routing pending issue 02)"
+}
+
 function Set-RdsAvailable {
     param([object]$Status)
     if ($Status.Database -eq 'absent') { return }

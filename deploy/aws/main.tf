@@ -18,6 +18,126 @@ terraform {
 }
 provider "aws" { region = var.aws_region }
 
+resource "aws_s3_bucket" "dashboard" {
+  bucket_prefix = "dashboard-"
+}
+
+resource "aws_s3_bucket_public_access_block" "dashboard" {
+  bucket                  = aws_s3_bucket.dashboard.id
+  block_public_acls       = true
+  block_public_policy     = true
+  ignore_public_acls      = true
+  restrict_public_buckets = true
+}
+
+resource "aws_s3_bucket_ownership_controls" "dashboard" {
+  bucket = aws_s3_bucket.dashboard.id
+  rule {
+    object_ownership = "BucketOwnerEnforced"
+  }
+}
+
+resource "aws_cloudfront_origin_access_control" "dashboard" {
+  name                              = "dashboard-s3"
+  origin_access_control_origin_type = "s3"
+  signing_behavior                  = "always"
+  signing_protocol                  = "sigv4"
+}
+
+resource "aws_cloudfront_function" "dashboard_routes" {
+  name    = "dashboard-routes"
+  runtime = "cloudfront-js-2.0"
+  publish = true
+  code    = <<-JS
+    function handler(event) {
+      var request = event.request;
+      var route = new RegExp(
+        '^/(account-attributes|branches|eligibility-reasons|fees|regions|' +
+        'products|pricing-plans|simulator)(/[^.]*)?$'
+      );
+      if (request.uri === '/' || route.test(request.uri)) {
+        request.uri = '/index.html';
+      }
+      return request;
+    }
+  JS
+}
+
+resource "aws_cloudfront_cache_policy" "dashboard" {
+  name        = "dashboard-static"
+  min_ttl     = 0
+  default_ttl = 300
+  max_ttl     = 31536000
+  parameters_in_cache_key_and_forwarded_to_origin {
+    enable_accept_encoding_brotli = true
+    enable_accept_encoding_gzip   = true
+    cookies_config { cookie_behavior = "none" }
+    headers_config { header_behavior = "none" }
+    query_strings_config { query_string_behavior = "none" }
+  }
+}
+
+resource "aws_cloudfront_distribution" "dashboard" {
+  enabled             = true
+  default_root_object = "index.html"
+
+  origin {
+    domain_name              = aws_s3_bucket.dashboard.bucket_regional_domain_name
+    origin_id                = "dashboard-s3"
+    origin_access_control_id = aws_cloudfront_origin_access_control.dashboard.id
+  }
+
+  default_cache_behavior {
+    target_origin_id       = "dashboard-s3"
+    viewer_protocol_policy = "redirect-to-https"
+    allowed_methods        = ["GET", "HEAD", "OPTIONS"]
+    cached_methods         = ["GET", "HEAD", "OPTIONS"]
+    compress               = true
+    cache_policy_id        = aws_cloudfront_cache_policy.dashboard.id
+    function_association {
+      event_type   = "viewer-request"
+      function_arn = aws_cloudfront_function.dashboard_routes.arn
+    }
+  }
+
+  restrictions {
+    geo_restriction { restriction_type = "none" }
+  }
+  viewer_certificate {
+    cloudfront_default_certificate = true
+  }
+}
+
+resource "aws_s3_bucket_policy" "dashboard" {
+  bucket = aws_s3_bucket.dashboard.id
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect    = "Allow"
+      Principal = { Service = "cloudfront.amazonaws.com" }
+      Action    = "s3:GetObject"
+      Resource  = "${aws_s3_bucket.dashboard.arn}/*"
+      Condition = {
+        StringEquals = {
+          "AWS:SourceArn" = aws_cloudfront_distribution.dashboard.arn
+        }
+      }
+    }]
+  })
+}
+
+output "dashboard_bucket_name" {
+  value = aws_s3_bucket.dashboard.id
+}
+
+output "dashboard_distribution_id" {
+  value = aws_cloudfront_distribution.dashboard.id
+}
+
+output "dashboard_url" {
+  value = "https://${aws_cloudfront_distribution.dashboard.domain_name}"
+}
+
 variable "aws_region" {
   type    = string
   default = "us-east-1"
