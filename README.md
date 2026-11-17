@@ -132,7 +132,7 @@ Requires **AWS CLI**, **Terraform**, and **Docker Desktop**.
 
 Terraform configuration lives in `deploy/aws/`; S3 state configuration lives in
 `deploy/aws/bootstrap/`. Start returns without changes when the application is already running.
-Otherwise, it prepares RDS, infrastructure and credentials, then builds and pushes the three AWS
+Otherwise, it prepares RDS, infrastructure and credentials, then builds and pushes all four
 application images while preserving existing service counts. It starts Engine and checks
 the expected task revision is healthy through `/openapi.yaml` before starting other stopped
 application services. If initialization fails, resources and previously running services are
@@ -150,16 +150,9 @@ Manager injection. It creates `accountdb`, `recommendationdb`, and login roles, 
 stores' Flyway migrations, and assigns grants before readiness. Pending processing and unavailable
 downstream services do not block initialization readiness.
 
-Open the CloudFront HTTPS address printed by the script. Start recreates the internal ALB and
-VPC origin, restores API routing, waits for CloudFront deployment and ECS readiness, and probes
-both existing API routes through HTTPS before reporting success.
-Stop drains the three application services and detaches CloudFront API routing while retaining
-the ALB and VPC origin. After that distribution update has deployed, it removes the VPC origin
-and ALB and stops RDS. The same distribution, HTTPS hostname, private S3 bucket, and published
-Dashboard files remain available. API requests are unavailable while stopped.
-Destroy removes the managed infrastructure and data, including CloudFront and Dashboard files;
-the state bucket remains separately managed. A subsequent full rebuild may issue a different
-CloudFront hostname, invalidating previously distributed URLs.
+Open the web address printed by the script. Stop drains all four application services before
+stopping the single RDS instance. Destroy removes the managed application infrastructure and data;
+the state bucket remains separately managed.
 
 ## Configuring Fees
 
@@ -175,26 +168,23 @@ To be filled out.
 
 ## AWS Infrastructure
 
-Terraform in `deploy/aws/` uses the existing VPC, public subnets for ECS, and private subnets
-for one internal ALB and one RDS PostgreSQL instance. ALB ingress permits CloudFront only.
-The Dashboard is served from private S3 through CloudFront; its ECS hosting is retired.
+Terraform in `deploy/aws/` uses the existing VPC, public subnets for ALB/ECS, and private subnets
+for one RDS PostgreSQL instance. The existing ALB HTTP allowlist is retained.
 
 ### Routing and health
 
 - The ALB sends `/api/v1/mock/*` to `pricing-mock-server-tg` on port 8081 with priority 1.
 - The general `/api/*` rule sends Backend requests to `pricing-backend-tg` on port 8080
   with priority 2.
-- CloudFront serves Dashboard pages/assets from S3 and sends `/api/*` to the internal ALB.
-- Unmatched ALB requests return a plain 404.
+- Other requests go to `pricing-dashboard-tg` on port 5173.
 - Backend and Mock Server use `/actuator/health`; Engine container readiness uses `/openapi.yaml`.
-- Each ECS application has its own security group. RDS permits PostgreSQL connections from
+- Each application has its own security group. RDS permits PostgreSQL connections from
   the Backend, Mock Processor, and Engine security groups.
 
 ### Containers and database initialization
 
-- ECR repositories: `pricing-backend`, `pricing-mock-server`, and `pricing-engine`.
-- ECS cluster: `pricing-app-cluster`, with Fargate task definitions and services for those three apps.
-- Dashboard local development and Compose retain their existing container build.
+- ECR repositories: `pricing-backend`, `pricing-dashboard`, `pricing-mock-server`, and `pricing-engine`.
+- ECS cluster: `pricing-app-cluster`, with a Fargate task definition and service for each application.
 - RDS instance: `pricing-app-db`, hosting `pricingdb`, `accountdb`, and `recommendationdb`.
 - RDS creates `pricingdb`; Engine owns creation of `accountdb`, `recommendationdb`, and login roles,
   all three stores' Flyway migrations, and grants. Backend and Mock Server production Flyway

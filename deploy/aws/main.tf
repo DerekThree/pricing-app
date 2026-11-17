@@ -18,185 +18,6 @@ terraform {
 }
 provider "aws" { region = var.aws_region }
 
-resource "aws_s3_bucket" "dashboard" {
-  bucket_prefix = "dashboard-"
-  force_destroy = true
-}
-
-resource "aws_s3_bucket_public_access_block" "dashboard" {
-  bucket                  = aws_s3_bucket.dashboard.id
-  block_public_acls       = true
-  block_public_policy     = true
-  ignore_public_acls      = true
-  restrict_public_buckets = true
-}
-
-resource "aws_s3_bucket_ownership_controls" "dashboard" {
-  bucket = aws_s3_bucket.dashboard.id
-  rule {
-    object_ownership = "BucketOwnerEnforced"
-  }
-}
-
-resource "aws_cloudfront_origin_access_control" "dashboard" {
-  name                              = "dashboard-s3"
-  origin_access_control_origin_type = "s3"
-  signing_behavior                  = "always"
-  signing_protocol                  = "sigv4"
-}
-
-resource "aws_cloudfront_function" "dashboard_routes" {
-  name    = "dashboard-routes"
-  runtime = "cloudfront-js-2.0"
-  publish = true
-  code    = <<-JS
-    function handler(event) {
-      var request = event.request;
-      var route = new RegExp(
-        '^/(account-attributes|branches|eligibility-reasons|fees|regions|' +
-        'products|pricing-plans|simulator)(/[^.]*)?$'
-      );
-      if (request.uri === '/' || route.test(request.uri)) {
-        request.uri = '/index.html';
-      }
-      return request;
-    }
-  JS
-}
-
-resource "aws_cloudfront_cache_policy" "dashboard" {
-  name        = "dashboard-static"
-  min_ttl     = 0
-  default_ttl = 300
-  max_ttl     = 31536000
-  parameters_in_cache_key_and_forwarded_to_origin {
-    enable_accept_encoding_brotli = true
-    enable_accept_encoding_gzip   = true
-    cookies_config { cookie_behavior = "none" }
-    headers_config { header_behavior = "none" }
-    query_strings_config { query_string_behavior = "none" }
-  }
-}
-
-data "aws_cloudfront_cache_policy" "api" {
-  name = "Managed-CachingDisabled"
-}
-
-data "aws_cloudfront_origin_request_policy" "api" {
-  name = "Managed-AllViewer"
-}
-
-resource "aws_cloudfront_vpc_origin" "api" {
-  count = var.alb_enabled ? 1 : 0
-  vpc_origin_endpoint_config {
-    name                   = "dashboard-api"
-    arn                    = aws_lb.pricing[0].arn
-    http_port              = 80
-    https_port             = 443
-    origin_protocol_policy = "http-only"
-    origin_ssl_protocols {
-      items    = ["TLSv1.2"]
-      quantity = 1
-    }
-  }
-  depends_on = [aws_lb_listener.http, aws_internet_gateway.pricing]
-}
-
-resource "aws_cloudfront_distribution" "dashboard" {
-  enabled             = true
-  default_root_object = "index.html"
-  wait_for_deployment = true
-
-  origin {
-    domain_name              = aws_s3_bucket.dashboard.bucket_regional_domain_name
-    origin_id                = "dashboard-s3"
-    origin_access_control_id = aws_cloudfront_origin_access_control.dashboard.id
-  }
-
-  dynamic "origin" {
-    for_each = var.alb_enabled && var.api_enabled ? [1] : []
-    content {
-      domain_name = aws_lb.pricing[0].dns_name
-      origin_id   = "api-alb"
-      vpc_origin_config {
-        vpc_origin_id = aws_cloudfront_vpc_origin.api[0].id
-      }
-    }
-  }
-
-  dynamic "ordered_cache_behavior" {
-    for_each = var.alb_enabled && var.api_enabled ? ["/api/*"] : []
-    content {
-      path_pattern             = ordered_cache_behavior.value
-      target_origin_id         = "api-alb"
-      viewer_protocol_policy   = "https-only"
-      allowed_methods          = ["GET", "HEAD", "OPTIONS", "PUT", "POST", "PATCH", "DELETE"]
-      cached_methods           = ["GET", "HEAD"]
-      cache_policy_id          = data.aws_cloudfront_cache_policy.api.id
-      origin_request_policy_id = data.aws_cloudfront_origin_request_policy.api.id
-    }
-  }
-
-  # Preserve origin errors, including Set-Cookie; never cache them or replace them with SPA HTML.
-  dynamic "custom_error_response" {
-    for_each = [400, 403, 404, 405, 414, 416, 500, 501, 502, 503, 504]
-    content {
-      error_code            = custom_error_response.value
-      error_caching_min_ttl = 0
-    }
-  }
-
-  default_cache_behavior {
-    target_origin_id       = "dashboard-s3"
-    viewer_protocol_policy = "redirect-to-https"
-    allowed_methods        = ["GET", "HEAD", "OPTIONS"]
-    cached_methods         = ["GET", "HEAD", "OPTIONS"]
-    compress               = true
-    cache_policy_id        = aws_cloudfront_cache_policy.dashboard.id
-    function_association {
-      event_type   = "viewer-request"
-      function_arn = aws_cloudfront_function.dashboard_routes.arn
-    }
-  }
-
-  restrictions {
-    geo_restriction { restriction_type = "none" }
-  }
-  viewer_certificate {
-    cloudfront_default_certificate = true
-  }
-}
-
-resource "aws_s3_bucket_policy" "dashboard" {
-  bucket = aws_s3_bucket.dashboard.id
-  policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [{
-      Effect    = "Allow"
-      Principal = { Service = "cloudfront.amazonaws.com" }
-      Action    = "s3:GetObject"
-      Resource  = "${aws_s3_bucket.dashboard.arn}/*"
-      Condition = {
-        StringEquals = {
-          "AWS:SourceArn" = aws_cloudfront_distribution.dashboard.arn
-        }
-      }
-    }]
-  })
-}
-
-output "dashboard_bucket_name" {
-  value = aws_s3_bucket.dashboard.id
-}
-
-output "dashboard_distribution_id" {
-  value = aws_cloudfront_distribution.dashboard.id
-}
-
-output "dashboard_url" {
-  value = "https://${aws_cloudfront_distribution.dashboard.domain_name}"
-}
-
 variable "aws_region" {
   type    = string
   default = "us-east-1"
@@ -205,6 +26,11 @@ variable "import_existing" {
   description = "Opt in to the retained imports after checking their resource IDs."
   type        = bool
   default     = false
+}
+variable "allowed_http_cidr" {
+  description = "Existing ALB HTTP allowlist; do not widen without explicit authorization."
+  type        = string
+  default     = "130.105.47.225/32"
 }
 variable "mock_server_desired_count" {
   type    = number
@@ -236,15 +62,18 @@ variable "backend_desired_count" {
     error_message = "backend_desired_count must be a nonnegative integer."
   }
 }
+variable "dashboard_desired_count" {
+  type    = number
+  default = 0
+  validation {
+    condition     = var.dashboard_desired_count >= 0 && floor(var.dashboard_desired_count) == var.dashboard_desired_count
+    error_message = "dashboard_desired_count must be a nonnegative integer."
+  }
+}
 variable "alb_enabled" {
   description = "Create ALB, listener and rule during start; destroy them during stop. Target groups persist."
   type        = bool
   default     = false
-}
-variable "api_enabled" {
-  description = "Detach CloudFront API routing before deleting the VPC origin and ALB."
-  type        = bool
-  default     = true
 }
 variable "rds_state" {
   description = "Desired RDS instance state: available or stopped."
@@ -309,19 +138,15 @@ resource "aws_route_table_association" "public" {
 }
 # Private subnets inherit the VPC main route table (local route only). No NAT.
 
-data "aws_ec2_managed_prefix_list" "cloudfront" {
-  name = "com.amazonaws.global.cloudfront.origin-facing"
-}
-
 resource "aws_security_group" "alb" {
   name        = "pricing-app-alb-sg"
   description = "Pricing App load balancer security group"
   vpc_id      = aws_vpc.pricing.id
   ingress {
-    from_port       = 80
-    to_port         = 80
-    protocol        = "tcp"
-    prefix_list_ids = [data.aws_ec2_managed_prefix_list.cloudfront.id]
+    from_port   = 80
+    to_port     = 80
+    protocol    = "tcp"
+    cidr_blocks = [var.allowed_http_cidr]
   }
   egress {
     from_port   = 0
@@ -337,6 +162,23 @@ resource "aws_security_group" "backend" {
   ingress {
     from_port       = 8080
     to_port         = 8080
+    protocol        = "tcp"
+    security_groups = [aws_security_group.alb.id]
+  }
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+}
+resource "aws_security_group" "dashboard" {
+  name        = "pricing-app-dashboard-sg"
+  description = "Pricing App dashboard security group"
+  vpc_id      = aws_vpc.pricing.id
+  ingress {
+    from_port       = 5173
+    to_port         = 5173
     protocol        = "tcp"
     security_groups = [aws_security_group.alb.id]
   }
@@ -479,6 +321,13 @@ resource "aws_ecr_repository" "backend" {
   image_scanning_configuration { scan_on_push = false }
   encryption_configuration { encryption_type = "AES256" }
 }
+resource "aws_ecr_repository" "dashboard" {
+  name                 = "pricing-dashboard"
+  image_tag_mutability = "MUTABLE"
+  force_delete         = true
+  image_scanning_configuration { scan_on_push = false }
+  encryption_configuration { encryption_type = "AES256" }
+}
 resource "aws_cloudwatch_log_group" "pricing" {
   name              = "/ecs/pricing-app"
   retention_in_days = 3
@@ -551,39 +400,6 @@ resource "aws_iam_role" "github_deploy" {
   })
 }
 
-resource "aws_iam_role_policy" "github_deploy_dashboard" {
-  name = "DashboardStaticPublish"
-  role = aws_iam_role.github_deploy.id
-  policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [
-      {
-        Effect   = "Allow"
-        Action   = "s3:ListBucket"
-        Resource = aws_s3_bucket.dashboard.arn
-      },
-      {
-        Effect   = "Allow"
-        Action   = "s3:PutObject"
-        Resource = "${aws_s3_bucket.dashboard.arn}/*"
-      },
-      {
-        Effect   = "Allow"
-        Action   = "cloudfront:ListDistributions"
-        Resource = "*"
-      },
-      {
-        Effect = "Allow"
-        Action = [
-          "cloudfront:CreateInvalidation",
-          "cloudfront:GetInvalidation",
-        ]
-        Resource = aws_cloudfront_distribution.dashboard.arn
-      },
-    ]
-  })
-}
-
 resource "aws_iam_role_policy" "github_deploy_ecr" {
   name = "PricingBackendECRPublish"
   role = aws_iam_role.github_deploy.id
@@ -609,6 +425,7 @@ resource "aws_iam_role_policy" "github_deploy_ecr" {
         ]
         Resource = [
           aws_ecr_repository.backend.arn,
+          aws_ecr_repository.dashboard.arn,
           aws_ecr_repository.engine.arn,
           aws_ecr_repository.mock_server.arn,
         ]
@@ -632,6 +449,7 @@ resource "aws_iam_role_policy" "github_deploy_ecs" {
         ]
         Resource = [
           aws_ecs_service.backend.arn,
+          aws_ecs_service.dashboard.arn,
           aws_ecs_service.engine.arn,
           aws_ecs_service.mock_server.arn,
         ]
@@ -673,11 +491,11 @@ resource "aws_ecs_cluster" "pricing" {
 resource "aws_lb" "pricing" {
   count              = var.alb_enabled ? 1 : 0
   name               = "pricing-app-alb"
-  internal           = true
+  internal           = false
   load_balancer_type = "application"
   ip_address_type    = "ipv4"
   security_groups    = [aws_security_group.alb.id]
-  subnets            = [aws_subnet.private["a"].id, aws_subnet.private["b"].id]
+  subnets            = [aws_subnet.public["a"].id, aws_subnet.public["b"].id]
 }
 resource "aws_lb_target_group" "backend" {
   name        = "pricing-backend-tg"
@@ -697,17 +515,37 @@ resource "aws_lb_target_group" "backend" {
     timeout             = 5
   }
 }
+resource "aws_lb_target_group" "dashboard" {
+  name        = "pricing-dashboard-tg"
+  port        = 5173
+  protocol    = "HTTP"
+  target_type = "ip"
+  vpc_id      = aws_vpc.pricing.id
+  health_check {
+    enabled             = true
+    path                = "/"
+    protocol            = "HTTP"
+    port                = "traffic-port"
+    matcher             = "200"
+    healthy_threshold   = 5
+    unhealthy_threshold = 2
+    interval            = 30
+    timeout             = 5
+  }
+}
 resource "aws_lb_listener" "http" {
   count             = var.alb_enabled ? 1 : 0
   load_balancer_arn = aws_lb.pricing[0].arn
   port              = 80
   protocol          = "HTTP"
   default_action {
-    type = "fixed-response"
-    fixed_response {
-      content_type = "text/plain"
-      message_body = "Not found"
-      status_code  = "404"
+    type             = "forward"
+    target_group_arn = aws_lb_target_group.dashboard.arn
+    forward {
+      target_group {
+        arn    = aws_lb_target_group.dashboard.arn
+        weight = 1
+      }
     }
   }
 }
@@ -746,10 +584,6 @@ resource "aws_ecs_task_definition" "backend" {
     }]
     environment = [
       { name = "SPRING_DATASOURCE_USERNAME", value = "pricingdb_backend" },
-      {
-        name  = "DASHBOARD_ORIGIN"
-        value = "https://${aws_cloudfront_distribution.dashboard.domain_name}"
-      },
       { name = "SPRING_DATASOURCE_URL", value = format("jdbc:postgresql://%s:%s/%s", aws_db_instance.pricing.address, aws_db_instance.pricing.port, aws_db_instance.pricing.db_name) }
     ]
     secrets = [{
@@ -770,6 +604,45 @@ resource "aws_ecs_task_definition" "backend" {
         "awslogs-group"         = aws_cloudwatch_log_group.pricing.name
         "awslogs-region"        = var.aws_region
         "awslogs-stream-prefix" = "backend"
+        "awslogs-create-group"  = "true"
+      }
+    }
+  }])
+}
+resource "aws_ecs_task_definition" "dashboard" {
+  family                   = "pricing-dashboard"
+  network_mode             = "awsvpc"
+  requires_compatibilities = ["FARGATE"]
+  cpu                      = "512"
+  memory                   = "1024"
+  execution_role_arn       = aws_iam_role.execution.arn
+  runtime_platform {
+    operating_system_family = "LINUX"
+    cpu_architecture        = "X86_64"
+  }
+  container_definitions = jsonencode([{
+    name           = "Main"
+    image          = format("%s:latest", aws_ecr_repository.dashboard.repository_url)
+    cpu            = 0
+    essential      = true
+    mountPoints    = []
+    volumesFrom    = []
+    systemControls = []
+    environment    = []
+    portMappings = [{
+      containerPort = 5173
+      hostPort      = 5173
+      protocol      = "tcp"
+      name          = "main-5173-tcp"
+      appProtocol   = "http"
+    }]
+    logConfiguration = {
+      logDriver     = "awslogs"
+      secretOptions = []
+      options = {
+        "awslogs-group"         = aws_cloudwatch_log_group.pricing.name
+        "awslogs-region"        = var.aws_region
+        "awslogs-stream-prefix" = "dashboard"
         "awslogs-create-group"  = "true"
       }
     }
@@ -816,6 +689,39 @@ resource "aws_ecs_service" "backend" {
     aws_iam_role_policy.execution_secret,
     aws_secretsmanager_secret_version.backend_password
   ]
+}
+resource "aws_ecs_service" "dashboard" {
+  force_new_deployment               = true
+  name                               = "pricing-dashboard-service"
+  cluster                            = aws_ecs_cluster.pricing.id
+  task_definition                    = aws_ecs_task_definition.dashboard.arn
+  desired_count                      = var.dashboard_desired_count
+  launch_type                        = "FARGATE"
+  platform_version                   = "1.4.0"
+  health_check_grace_period_seconds  = 0
+  deployment_minimum_healthy_percent = 100
+  deployment_maximum_percent         = 200
+  enable_ecs_managed_tags            = true
+  enable_execute_command             = false
+  propagate_tags                     = "NONE"
+  deployment_circuit_breaker {
+    enable   = true
+    rollback = true
+  }
+  network_configuration {
+    subnets          = [aws_subnet.public["a"].id]
+    security_groups  = [aws_security_group.dashboard.id]
+    assign_public_ip = true
+  }
+  dynamic "load_balancer" {
+    for_each = var.alb_enabled ? [1] : []
+    content {
+      target_group_arn = aws_lb_target_group.dashboard.arn
+      container_name   = "Main"
+      container_port   = 5173
+    }
+  }
+  depends_on = [aws_lb_listener.http, aws_iam_role_policy_attachment.execution_base]
 }
 output "alb_dns_name" {
   value = var.alb_enabled ? aws_lb.pricing[0].dns_name : null
@@ -902,10 +808,6 @@ resource "aws_ecs_task_definition" "mock_server" {
     }]
     environment = [
       { name = "SPRING_DATASOURCE_USERNAME", value = "accountdb_mock_server" },
-      {
-        name  = "DASHBOARD_ORIGIN"
-        value = "https://${aws_cloudfront_distribution.dashboard.domain_name}"
-      },
       {
         name = "ENGINE_WAKE_UP_URL"
         value = format(

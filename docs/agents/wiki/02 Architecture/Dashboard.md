@@ -12,29 +12,6 @@ The dashboard is a React 19 client-side SPA built with React Router 7, TypeScrip
 
 ## Routes and screens
 
-Dashboard CI typechecks, runs browser tests, and publishes the production `build/client` artifact.
-CD uses the existing AWS OIDC role to upload it and same-origin runtime config to private S3,
-waits for CloudFront invalidation, and compares all published bytes through HTTPS. It does not
-build a Dashboard image or require ECS. CD discovers the current distribution and bucket from
-the `dashboard-s3` origin on every release, including after infrastructure recreation. The Dashboard
-README documents publishing permissions. `Publish-Dashboard` in
-`deploy/setup.ps1` remains available for manual publishing. Terraform manages the public access block,
-Origin Access Control, distribution, and a viewer-request function that rewrites Dashboard routes
-to `/index.html`. API paths and assets are not rewritten. Entry/config objects revalidate;
-fingerprinted assets cache for one year.
-See [ADR 0006](../../../ADR/0006-host-dashboard-on-s3-and-cloudfront.md).
-With the ALB enabled, `/api/*` uses the same CloudFront HTTPS hostname and one VPC origin to the
-internal ALB. Its existing path rules send `/api/v1/mock/*` to the Mock Account Processor ahead
-of the Backend rule. API caching and error caching are disabled; all viewer headers, cookies,
-query strings, and request bodies are forwarded. See [ADR 0007](../../../ADR/0007-choose-backend-exposure-architecture.md).
-Dashboard ECS hosting, its ECR repository, target group, and task security group are removed.
-AWS build/push, status checks, and scaling cover Backend, Mock Processor, and Engine only.
-Routine Stop detaches API routing, waits for CloudFront deployment, then deletes the VPC origin
-and internal ALB. It retains the distribution's exact HTTPS hostname, bucket and Dashboard files.
-Start restores API connectivity on that distribution. Full Destroy also removes CloudFront and
-the populated bucket; rebuilding may change the hostname and invalidate distributed URLs.
-Dashboard source, generated clients, browser tests, local builds, and Compose remain available.
-
 [routes.ts](../../../../pricing-dashboard/app/routes.ts) defines one shared layout and these screens:
 
 - Branches, Regions, Products, Fees;
@@ -64,7 +41,6 @@ flowchart TB
 [crudRouteUtils.ts](../../../../pricing-dashboard/app/utils/crudRouteUtils.ts) centralizes standard CRUD parameter validation, parallel record/options loading, action dispatch, response-code checks, success redirects, and error extraction. Pages keep editable values in local state through [useFormValues.ts](../../../../pricing-dashboard/app/hooks/useFormValues.ts).
 
 The generated client returns `{ data, status, headers }` for both successful and unsuccessful HTTP responses. [apiMutator.ts](../../../../pricing-dashboard/app/utils/apiMutator.ts) also turns a network failure into a synthetic `503` response, so loaders and actions handle backend and network failures in the same shape.
-XML/HTML error bodies use the existing HTTP-status message instead of displaying raw markup.
 
 ## Generated client boundary
 
