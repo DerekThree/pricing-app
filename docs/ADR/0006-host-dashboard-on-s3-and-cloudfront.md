@@ -6,7 +6,7 @@ Accepted
 
 ## Context
 
-The client-only React Dashboard builds to static files but runs in an ECS Fargate container.
+The client-only React Dashboard builds to static files but previously ran in an ECS container.
 Static hosting provides HTTPS without a purchased domain or certificate.
 
 ## Options Considered
@@ -31,8 +31,25 @@ This serves static files without requiring Dashboard compute and provides a publ
 
 ## Consequences
 
-Issue 01 adds independently verifiable static hosting and a publishing function in deploy/setup.ps1.
-Existing ECS hosting and API exposure remain during this slice. Static-site same-origin API paths
-are unavailable until the API routing cutover; loading static files does not verify API access.
-Later migration issues replace Dashboard container delivery and remove its ECS hosting.
-Backend exposure is tracked separately in ADR 0007.
+Dashboard CI publishes its existing browser build as an artifact after typecheck and browser
+tests. CD discovers the current distribution and bucket through the existing `dashboard-s3` origin,
+so infrastructure recreation requires no manual ID updates. It uses the existing AWS OIDC role
+with account-wide distribution-list access and bucket/distribution-scoped publishing permissions,
+uploads static assets and same-origin runtime config, and publishes HTML last. It waits for
+CloudFront invalidation and verifies every published object's bytes through HTTPS before success.
+Dashboard delivery no longer builds an ECR image or requests an ECS rollout.
+The publishing function in deploy/setup.ps1 also sets both API base URLs to the browser's origin.
+While the ALB is enabled, CloudFront routes `/api/*` through one VPC origin to the existing ALB,
+configured as internal in the two existing private subnets. Static requests continue to use S3.
+API requests have caching disabled and preserve origin errors rather than returning SPA HTML.
+Dashboard ECS service/task definition, ECR repository, ALB target group, and task security group
+are removed. Local Dashboard development and Compose retain their existing container build.
+Backend exposure and forwarding policy are documented in ADR 0007.
+
+Routine Stop detaches API routing, then removes the VPC origin and internal ALB. It retains
+the distribution, its exact HTTPS hostname, the private S3 bucket and published files.
+Start restores API connectivity on that same distribution. Explicit full
+Destroy removes the distribution and populated bucket; a subsequent full rebuild may issue a
+different hostname and invalidate previously distributed URLs, including magic-link URLs.
+S3 storage and CloudFront delivery remain billable while stopped; Dashboard ECS and ECR hosting
+costs are removed.

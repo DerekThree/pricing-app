@@ -7,7 +7,8 @@ $Root = Split-Path -Parent $PSScriptRoot
 $Infra = Join-Path $PSScriptRoot 'aws'
 $Local = Join-Path $PSScriptRoot 'local'
 $RepoNames = @('pricing-backend', 'pricing-dashboard', 'pricing-mock-server', 'pricing-engine')
-$ServiceNames = @($RepoNames | ForEach-Object { "$_-service" })
+$ServiceNames = @($RepoNames | Where-Object { $_ -ne 'pricing-dashboard' } |
+    ForEach-Object { "$_-service" })
 $Cluster = 'pricing-app-cluster'
 $Database = 'pricing-app-db'
 $script:MenuAwsStatus = $null
@@ -126,6 +127,16 @@ function Assert-StateAccount {
 }
 
 function Get-AwsStatus {
+    $distributions = @(Get-AwsJson @(
+        'cloudfront', 'list-distributions', '--query',
+        "DistributionList.Items[?Origins.Items[?Id=='dashboard-s3']]"
+    ))
+    $distribution = $distributions | Select-Object -First 1
+    $apiAttached = @($distribution.Origins.Items | Where-Object {
+        $_.Id -eq 'api-alb' -and $_.VpcOriginConfig.VpcOriginId
+    }).Count -eq 1 -and @($distribution.CacheBehaviors.Items | Where-Object {
+        $_.PathPattern -eq '/api/*' -and $_.TargetOriginId -eq 'api-alb'
+    }).Count -eq 1
     $databases = @(Get-AwsJson @(
         'rds', 'describe-db-instances', '--query',
         "DBInstances[?DBInstanceIdentifier=='$Database']"
@@ -158,12 +169,15 @@ function Get-AwsStatus {
         Database = $dbStatus
         Services = $services
         LoadBalancers = $loadBalancers
+        DashboardUrl = if ($distribution) { "https://$($distribution.DomainName)" } else { $null }
         Running = ($dbStatus -eq 'available' -and $readyServices.Count -eq $ServiceNames.Count -and
-            $loadBalancers.Count -eq 1 -and $loadBalancers[0].State.Code -eq 'active')
+            $loadBalancers.Count -eq 1 -and $loadBalancers[0].State.Code -eq 'active' -and
+            $loadBalancers[0].Scheme -eq 'internal' -and $distributions.Count -eq 1 -and
+            $distribution.Enabled -and $distribution.Status -eq 'Deployed' -and $apiAttached)
         NeedsStop = ($dbStatus -notin @('absent', 'stopped') -or
-            $busyServices.Count -gt 0 -or $loadBalancers.Count -gt 0)
+            $busyServices.Count -gt 0 -or $loadBalancers.Count -gt 0 -or $apiAttached)
         Exists = ($databases.Count -gt 0 -or $services.Count -gt 0 -or
-            $loadBalancers.Count -gt 0)
+            $loadBalancers.Count -gt 0 -or $distributions.Count -gt 0)
     }
 }
 
@@ -206,9 +220,10 @@ function Copy-Repositories {
 }
 
 function Build-LocalImages {
+    param([string[]]$Names = $RepoNames)
     Invoke-Native docker @('info') -Capture | Out-Null
     Copy-Repositories
-    foreach ($name in $RepoNames) {
+    foreach ($name in $Names) {
         $buildContext = if ($name -in @('pricing-backend', 'pricing-mock-server', 'pricing-engine')) {
             $Root
         } else {
@@ -326,7 +341,7 @@ function Publish-Dashboard {
         Pop-Location
     }
     $client = Join-Path $dashboard 'build/client'
-    # API behaviors are added in the next migration slice. These paths fail until then.
+    # Empty API base URLs keep both clients on the CloudFront HTTPS origin.
     $config = 'window.__APP_CONFIG__ = {"BACKEND_API_URL":"","ACCOUNT_PROCESSOR_API_URL":""};'
     Set-Content -LiteralPath (Join-Path $client 'config.js') -Value $config -Encoding UTF8
     $destination = "s3://$($bucket.bucket)"
@@ -354,7 +369,7 @@ function Publish-Dashboard {
         'cloudfront', 'create-invalidation', '--distribution-id', $distribution.id,
         '--paths', '/*', '--region', $AwsRegion, '--no-cli-pager'
     )
-    Write-Host "Dashboard: https://$($distribution.domain_name) (API routing pending issue 02)"
+    Write-Host "Dashboard: https://$($distribution.domain_name)"
 }
 
 function Set-RdsAvailable {
@@ -393,13 +408,13 @@ function Set-RdsAvailable {
 function Push-Images {
     $resources = @(Get-StateResources)
     $images = @()
-    foreach ($name in @('backend', 'dashboard', 'mock_server', 'engine')) {
+    foreach ($name in @('backend', 'mock_server', 'engine')) {
         $repository = Get-StateValue $resources 'aws_ecr_repository' $name
         if (-not $repository.repository_url) { throw "Missing ECR repository: $name." }
         $images += [pscustomobject]@{ Name = $repository.name; Url = $repository.repository_url }
     }
 
-    Build-LocalImages
+    Build-LocalImages -Names @($images.Name)
     $registry = $images[0].Url.Split('/')[0]
     # Keep the password pipe inside cmd.exe: Windows PowerShell 5.1 can alter
     # native-command stdin, while cmd.exe passes the AWS token through intact.
@@ -458,7 +473,7 @@ function Wait-Services {
             }
         } elseif ($status.Running) {
             $resources = @(Get-StateResources)
-            foreach ($name in @('backend', 'dashboard', 'mock_server', 'engine')) {
+            foreach ($name in @('backend', 'mock_server', 'engine')) {
                 $expected = Get-StateValue $resources 'aws_ecs_service' $name
                 $actual = $status.Services | Where-Object {
                     $_.serviceName -eq $expected.name
@@ -486,10 +501,12 @@ function Invoke-AwsOperation {
     $status = Get-AwsStatus
     if ($Operation -eq 'Start' -and $status.Running) {
         Write-Host 'App is already running in AWS.'
+        Write-Host "Dashboard: $($status.DashboardUrl)"
         return
     }
     if ($Operation -eq 'Stop' -and -not $status.NeedsStop) {
         Write-Host 'App is already stopped in AWS.'
+        Write-Host "Dashboard: $($status.DashboardUrl)"
         return
     }
     if (-not $resources.Count -and $status.Exists) {
@@ -508,7 +525,7 @@ function Invoke-AwsOperation {
         switch ($Operation) {
             'Start' {
                 $serviceCounts = @{}
-                foreach ($name in @('backend', 'dashboard', 'mock_server', 'engine')) {
+                foreach ($name in @('backend', 'mock_server', 'engine')) {
                     $service = $status.Services | Where-Object {
                         $_.serviceName -eq "pricing-$($name.Replace('_', '-'))-service"
                     }
@@ -526,7 +543,7 @@ function Invoke-AwsOperation {
                 Write-Host 'Provision infrastructure and credentials, preserving service counts.'
                 Invoke-Terraform (@(
                     'apply', '-var=rds_state=available', '-var=alb_enabled=true',
-                    '-var=import_existing=false'
+                    '-var=api_enabled=true', '-var=import_existing=false'
                 ) + @($serviceCounts.Keys | ForEach-Object {
                     "-var=$($_)_desired_count=$($serviceCounts[$_])"
                 }))
@@ -536,7 +553,8 @@ function Invoke-AwsOperation {
                     Write-Host 'Start Engine and wait for database initialization readiness.'
                     Invoke-Terraform (@(
                         'apply', '-var=rds_state=available',
-                        '-var=alb_enabled=true', '-var=import_existing=false'
+                        '-var=alb_enabled=true', '-var=api_enabled=true',
+                        '-var=import_existing=false'
                     ) + @($serviceCounts.Keys | ForEach-Object {
                         "-var=$($_)_desired_count=$($serviceCounts[$_])"
                     }))
@@ -560,30 +578,52 @@ function Invoke-AwsOperation {
                 Write-Host 'Engine initialization succeeded. Start the other services.'
                 Invoke-Terraform (@(
                     'apply', '-var-file=started.tfvars', '-var=import_existing=false'
+                    '-var=api_enabled=true'
                 ) + @($serviceCounts.Keys | ForEach-Object {
                     "-var=$($_)_desired_count=$([Math]::Max(1, $serviceCounts[$_]))"
                 }))
                 Wait-Services
-                Invoke-Terraform @('output', '-raw', 'alb_dns_name')
-                Write-Host ''
+                $url = Invoke-Native terraform @(
+                    "-chdir=$Infra", 'output', '-raw', 'dashboard_url'
+                ) -Capture
+                $backend = Invoke-WebRequest -UseBasicParsing -TimeoutSec 30 `
+                    -Uri "$url/api/v1/branches"
+                $mock = Invoke-WebRequest -UseBasicParsing -TimeoutSec 30 `
+                    -Method Options -Uri "$url/api/v1/mock/acc/batch"
+                if ($backend.StatusCode -ne 200 -or
+                    $backend.Headers['Content-Type'] -notmatch 'application/json' -or
+                    $mock.StatusCode -ne 200 -or
+                    ($mock.Headers['Allow'] -join ',') -notmatch '\bPOST\b') {
+                    throw 'API connectivity checks failed through CloudFront.'
+                }
+                Write-Host "APIs ready. Dashboard: $url"
             }
             'Stop' {
                 Set-RdsAvailable $status
-                Write-Host 'Stop ECS and remove the ALB.'
+                $albEnabled = ($status.LoadBalancers.Count -gt 0).ToString().ToLowerInvariant()
+                Write-Host 'Drain ECS and detach API routing; wait for CloudFront deployment.'
                 Invoke-Terraform @(
-                    'apply', '-var=rds_state=available',
+                    'apply', '-var=rds_state=available', "-var=alb_enabled=$albEnabled",
+                    '-var=api_enabled=false', '-var=backend_desired_count=0',
+                    '-var=mock_server_desired_count=0', '-var=engine_desired_count=0',
                     '-var=import_existing=false'
                 )
                 Wait-Services -Stopped
-                Write-Host 'Stop RDS after ECS has drained.'
+                Write-Host 'Remove the detached VPC origin and ALB, then stop RDS.'
                 Invoke-Terraform @(
-                    'apply', '-var=import_existing=false'
+                    'apply', '-var=alb_enabled=false', '-var=api_enabled=false',
+                    '-var=rds_state=stopped', '-var=backend_desired_count=0',
+                    '-var=mock_server_desired_count=0', '-var=engine_desired_count=0',
+                    '-var=import_existing=false'
                 )
+                Invoke-Terraform @('output', '-raw', 'dashboard_url')
+                Write-Host ''
             }
             'Destroy' {
-                Write-Host 'Destroy removes all managed infrastructure, database data, and ECR images.'
+                Write-Host 'Destroy removes infrastructure, database data, images and Dashboard files.'
+                Write-Host 'A full rebuild may issue a different CloudFront HTTPS hostname.'
                 Invoke-Terraform @(
-                    'destroy', '-var-file=started.tfvars', '-var=import_existing=false'
+                    'destroy', '-var-file', 'started.tfvars', '-var', 'import_existing=false'
                 )
             }
         }
@@ -658,7 +698,7 @@ function Show-Menu {
     }
     if ($status) {
         if ($status.Running) {
-            $address = "http://$($status.LoadBalancers[0].DNSName)"
+            $address = $status.DashboardUrl
             $reasons[3] = (@(
                 $reasons[3], "Already running at $address"
             ) | Where-Object { $_ }) -join '; '

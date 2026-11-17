@@ -3,6 +3,5 @@
 rds_state                 = "available"
 alb_enabled               = true
 backend_desired_count     = 1
-dashboard_desired_count   = 1
 mock_server_desired_count = 1
 engine_desired_count      = 1
