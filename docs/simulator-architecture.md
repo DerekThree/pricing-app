@@ -27,7 +27,7 @@ See the [high-level system diagram](system-architecture.md#2-high-level-planned-
 | Pricing Backend | Owns the real pricing data HTTP APIs. |
 | Pricing Engine | Runs separately, processes persisted account batches, reads pricing data, and persists transaction recommendations. |
 | Mock Account Processor | Simulates the external Account Processor, persists account batches, and notifies the Pricing Engine that work may be available. |
-| Mock Transaction Processor | Simulates the external Transaction Processor by reading persisted recommendations and forwarding Batch Results to the Dashboard. |
+| Mock Transaction Processor | Simulates the external Transaction Processor by reading persisted recommendations and forwarding Transaction Batches to the Dashboard. |
 
 The two mocks run as separate components in one Mock Server application. That
 application remains separate from both `pricing-backend` and the Pricing Engine. All applications may
@@ -55,7 +55,7 @@ those boundaries, but they should behave as if they were independent external sy
 10. After persistence succeeds, the Pricing Engine sends an HTTP wake-up notification to the Mock
     Transaction Processor.
 11. The Mock Transaction Processor queries the Recommendation Store for unprocessed recommendations.
-12. The Mock Transaction Processor forwards the stored Batch Result to the Dashboard over WebSocket.
+12. The Mock Transaction Processor forwards the stored Transaction Batch to the Dashboard over WebSocket.
 13. The Dashboard correlates the displayed result using `batchId`, `accountNumber`, and
     `feeRequestId`.
 
@@ -246,7 +246,7 @@ not the persisted batch contents.
 ## Result delivery
 
 The Mock Transaction Processor forwards the Pricing Engine's stored recommendations without
-simulating transaction execution. It sends one complete Batch Result per Pricing Batch to the
+simulating transaction execution. It sends one complete Transaction Batch per Pricing Batch to the
 single Dashboard over WebSocket. The mock connection requires no authentication.
 
 The processor reads and forwards one pending batch at a time. Each batch receives one delivery

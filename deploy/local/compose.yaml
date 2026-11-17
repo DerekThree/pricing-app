@@ -51,6 +51,9 @@ services:
       SPRING_DATASOURCE_USERNAME: accountdb_mock_server
       SPRING_DATASOURCE_PASSWORD: ${MOCK_SERVER_PASSWORD:?Set MOCK_SERVER_PASSWORD in deploy/local/.env}
       ENGINE_WAKE_UP_URL: http://engine:8082/api/v1/work-available
+      RECOMMENDATION_STORE_URL: jdbc:postgresql://postgres:5432/recommendationdb
+      RECOMMENDATION_STORE_USERNAME: recommendationdb_txn_processor
+      RECOMMENDATION_STORE_PASSWORD: ${TXN_PROCESSOR_PASSWORD}
     ports:
       - "8081:8081"
     depends_on:
@@ -109,6 +112,7 @@ services:
     environment:
       BACKEND_API_URL: http://localhost:8080
       ACCOUNT_PROCESSOR_API_URL: http://localhost:8081
+      TRANSACTION_PROCESSOR_WS_URL: ws://localhost:8081/api/v1/mock/txn/batches
     ports:
       - "5173:5173"
     depends_on:

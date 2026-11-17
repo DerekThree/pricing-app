@@ -81,3 +81,12 @@ Outcome codes are stored in Recommendation Store columns: `account_recommendatio
 | A persisted Eligibility Reason condition uses an operator supported by its configured Attribute type during Pricing Batch evaluation | Yes | Partial — operator values constrained, not compatibility with attribute type | `INVALID_ELIGIBILITY_CONDITION` |
 | A Batch Account has an applicable Pricing Plan for its Product, Region, and Pricing Date | Yes | No | `PLAN_NOT_FOUND` |
 | One Recommendation Outbox row per batch identifier | No | Yes | Duplicate batch IDs are rejected; existing recommendations are retained |
+
+## Mock Transaction Processor — Transaction Batches
+
+| Validation | Contract | Dashboard | Outcome |
+| --- | --- | --- | --- |
+| Complete Transaction Batch fields, identifiers, statuses, and types match the versioned provider schema | `pricing-mock-server/schemas/transaction-batch-v1.json`, referenced by AsyncAPI | Native WebSocket wrapper parses as `unknown`, then validates with Ajv | Malformed JSON or schema-invalid messages do not update result state |
+| Account success has a plan and fee list; account failures have null plan and fees | JSON Schema conditionals | Same generated schema | Incompatible nullability is rejected before display |
+| Charged fees have an amount and null reasons; waived fees have null amount and a reasons list; failed fees have both null | JSON Schema conditionals | Same generated schema | Incompatible nullability is rejected before display |
+| Result belongs to the Simulator's current batch | `batchId` is required | Matches the active batch UUID | Other batches do not update the current result; Reset clears it |

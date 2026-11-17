@@ -91,7 +91,17 @@ acknowledgement and current batch UUID while preserving the drafts. The next sub
 new UUID. HTTP and transport failures, including timeouts, restore `Send` and editability; retries
 reuse the submitted batch UUID even after draft corrections. `BATCH_ALREADY_ACCEPTED` HTTP 409
 displays the provider's error and retains `Reset` and locking without creating an acknowledgement.
-No completed pricing results or WebSocket connection are used.
+The Simulator's native WebSocket wrapper receives complete Transaction Batches from the Mock
+Transaction Processor at `/api/v1/mock/txn/batches`. It parses messages as `unknown` and validates
+them against the provider-owned versioned JSON Schema before updating separate result state for
+the current batch UUID. Reset also clears this result state. The fourth column displays account
+and Fee Request identifiers, statuses, pricing plans, amounts, and Eligibility Reason codes.
+
+`npm run generate:transaction-batches` cleans and generates `app/generated/transactionProcessor/` from
+the Mock Server schema referenced by its AsyncAPI contract. `TRANSACTION_PROCESSOR_WS_URL` follows
+the existing native-development and container-start runtime configuration pattern. Unset
+production configuration uses the current ECS/ALB host and its matching WS/WSS protocol; the
+S3/CloudFront migration was rolled back. Reconnection and deployed verification remain later work.
 
 ## Browser tests
 

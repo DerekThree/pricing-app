@@ -65,5 +65,5 @@ Check these pairs whenever either side changes:
 - [GlobalExceptionHandler.java](../../../../pricing-backend/src/main/java/com/pricing/backend/config/GlobalExceptionHandler.java)
 - [PricingPlanValidator.java](../../../../pricing-backend/src/main/java/com/pricing/backend/pricingplan/PricingPlanValidator.java)
 - [EligibilityReasonValidator.java](../../../../pricing-backend/src/main/java/com/pricing/backend/eligibilityreason/EligibilityReasonValidator.java)
-- [BatchValidator.java](../../../../pricing-mock-server/src/main/java/com/pricing/mockserver/batch/BatchValidator.java)
+- [AccountValidator.java](../../../../pricing-mock-server/src/main/java/com/pricing/mockServer/accountProcessor/AccountValidator.java)
 - [PostgreSQL active-period migration](../../../../pricing-backend/src/main/resources/db/postgresql/V17__prevent_overlapping_pricing_plan_active_periods.sql)

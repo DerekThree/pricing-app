@@ -24,9 +24,9 @@ sequenceDiagram
         S->>A: discover unprocessed account batch identifiers
         loop one discovered account batch at a time
             S->>A: read accounts, attributes, Fee Requests
-            S->>E: RuleEngineBatch with per-account Pricing Dates
+            S->>E: RuleEngineAccountBatch with per-account Pricing Dates
             E->>C: load immutable pricing data using REPEATABLE_READ
-            E-->>S: RuleEngineBatchResult
+            E-->>S: RuleEngineReocmmendationBatch
             S->>R: commit recommendation records and outbox atomically
             S->>A: commit processed flag
         end
@@ -152,7 +152,7 @@ Successful Fee Requests have one status:
 
 Failures use a status such as `FEE_NOT_FOUND` without a pricing amount or decision. The Recommendation Store has no separate `decision` column.
 
-The statuses are defined in [RuleEngineBatchResult.java](../../../../pricing-engine/src/main/java/com/pricing/engine/ruleEngine/RuleEngineBatchResult.java), with examples in [RuleEngineTests.java](../../../../pricing-engine/src/test/java/com/pricing/engine/RuleEngineTests.java) and [Phase4PersistencePostgresTests.java](../../../../pricing-engine/src/test/java/com/pricing/engine/engineService/Phase4PersistencePostgresTests.java).
+The statuses are defined in [RuleEngineReocmmendationBatch.java](../../../../pricing-engine/src/main/java/com/pricing/engine/ruleEngine/RuleEngineReocmmendationBatch.java), with examples in [RuleEngineTests.java](../../../../pricing-engine/src/test/java/com/pricing/engine/RuleEngineTests.java) and [Phase4PersistencePostgresTests.java](../../../../pricing-engine/src/test/java/com/pricing/engine/engineService/Phase4PersistencePostgresTests.java).
 
 ## 7. Persist recommendations and complete the source
 

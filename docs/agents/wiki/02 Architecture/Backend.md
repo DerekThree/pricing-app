@@ -91,9 +91,9 @@ JPA repositories and separate local store transactions.
 
 The engine owns transport- and JPA-independent records:
 
-- [RuleEngineBatch.java](../../../../pricing-engine/src/main/java/com/pricing/engine/RuleEngineBatch.java) for input;
+- [RuleEngineAccountBatch.java](../../../../pricing-engine/src/main/java/com/pricing/engine/RuleEngineAccountBatch.java) for input;
 - [Pricing.java](../../../../pricing-engine/src/main/java/com/pricing/engine/ruleEngine/Pricing.java) for immutable pricing data;
-- [RuleEngineBatchResult.java](../../../../pricing-engine/src/main/java/com/pricing/engine/RuleEngineBatchResult.java) for statuses and Pricing Decisions;
+- [RuleEngineReocmmendationBatch.java](../../../../pricing-engine/src/main/java/com/pricing/engine/ruleEngine/RuleEngineReocmmendationBatch.java) for statuses and Pricing Decisions;
 - [PrototypeRuleEngine.java](../../../../pricing-engine/src/main/java/com/pricing/engine/PrototypeRuleEngine.java) as the implementation.
 
 `PricingRepository` loads the engine's immutable pricing data. It filters candidate
