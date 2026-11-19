@@ -44,7 +44,7 @@ recommendations switch recovery to source completion without recalculation or re
 | Batch trigger | Database initialization gates HTTP readiness; startup recovery runs in the background; payload-free `POST /api/v1/work-available` returns empty HTTP 202 | No queued wake-ups or healthy idle polling |
 | Pricing Decisions | Relational recommendations and one outbox row; post-commit HTTP wake-ups | Transaction Processor consumes persisted output |
 | Outbox and recovery | Transactional Account claims with skip-locked discovery; atomic recommendation/outbox persistence; source completion after output commit; worker-local result, completion, and unsaved-error recovery; uniqueness preserves committed output | ADR 0008 recovery implemented |
-| Transaction Processor | Not implemented | Mock external consumer of persisted recommendations |
+| Transaction Processor | Mock Server discovers pending recommendations on startup/restart and bodyless HTTP wake-ups. Overlapping wake-ups share a serial drain. Temporary store failures pause it until the retained operation recovers. | After a send or skip, only the outbox update retries. A crash before that update can repeat a `batchId` after restart. Processed rows are skipped and recommendations remain unchanged. |
 | Rates | No current route, entity, migration, or dashboard screen | Mentioned in historical/planned material but not defined as a current domain capability |
 
 ## Accepted decisions versus implementation
@@ -59,7 +59,9 @@ coordinated so eligible work is not stranded.
 The engine sends downstream wake-ups after recommendation commit, independently of source completion.
 Delivery follows the Account Store convention: HTTP acknowledgement leaves the outbox unchanged,
 and startup sends a wake-up when unprocessed recommendations exist.
-The Transaction Processor remains future work.
+The Mock Server's Transaction Processor implements this consumer boundary.
+The processor completes each outbox row after one socket send attempt or a disconnected skip,
+including when the write fails. The Dashboard reconnects automatically for future live results.
 
 [planned-system-architecture.md](../../../planned-system-architecture.md) is marked `design-in-progress`. Its “IMPLEMENTED” sections are useful summaries, but future-tense service topology is not evidence of current runtime behavior.
 
@@ -89,8 +91,8 @@ Mock Account Processor
 Wake-ups contain no `batchId`; PostgreSQL processing state is the durable source of work. The
 engine's wake-up endpoint and downstream wake-up client are implemented. Duplicate incoming
 wake-ups discover work when capacity is available; startup recovery resends downstream wake-ups while recommendations
-remain unprocessed. Interrupted-completion recovery is implemented. The Transaction Processor
-remains future work.
+remain unprocessed. Interrupted-completion recovery is implemented. The Mock Server's Transaction
+Processor discovers pending recommendations on startup/restart and drains them serially on wake-ups.
 
 ## Scope check for new work
 

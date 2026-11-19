@@ -174,6 +174,9 @@ for one RDS PostgreSQL instance. The existing ALB HTTP allowlist is retained.
 ### Routing and health
 
 - The ALB sends `/api/v1/mock/*` to `pricing-mock-server-tg` on port 8081 with priority 1.
+  This rule also forwards the WebSocket upgrade for `/api/v1/mock/txn/batches`.
+- The Dashboard ECS task supplies `TRANSACTION_PROCESSOR_WS_URL` using the ALB's HTTP listener
+  as `ws://<ALB DNS name>/api/v1/mock/txn/batches`. The container publishes it in `/config.js`.
 - The general `/api/*` rule sends Backend requests to `pricing-backend-tg` on port 8080
   with priority 2.
 - Other requests go to `pricing-dashboard-tg` on port 5173.

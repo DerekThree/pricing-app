@@ -96,12 +96,15 @@ Transaction Processor at `/api/v1/mock/txn/batches`. It parses messages as `unkn
 them against the provider-owned versioned JSON Schema before updating separate result state for
 the current batch UUID. Reset also clears this result state. The fourth column displays account
 and Fee Request identifiers, statuses, pricing plans, amounts, and Eligibility Reason codes.
+After a lost connection, the wrapper reconnects automatically for future live results.
 
-`npm run generate:transaction-batches` cleans and generates `app/generated/transactionProcessor/` from
-the Mock Server schema referenced by its AsyncAPI contract. `TRANSACTION_PROCESSOR_WS_URL` follows
-the existing native-development and container-start runtime configuration pattern. Unset
-production configuration uses the current ECS/ALB host and its matching WS/WSS protocol; the
-S3/CloudFront migration was rolled back. Reconnection and deployed verification remain later work.
+`npm run generate:transaction-batch` cleans and generates `app/generated/transactionProcessor/` from
+the Mock Server schema referenced by its AsyncAPI contract. Dashboard CI checks out that schema
+before generating the models for typechecking, browser tests, and the Docker image build.
+The Dashboard ECS task sets `TRANSACTION_PROCESSOR_WS_URL` to the existing HTTP ALB's `ws://` URL
+under `/api/v1/mock/*`. The container writes it to `/config.js` at startup. Unset production
+configuration uses the Dashboard's current host and matching WS/WSS protocol.
+`TXN_PROCESSOR_WS_RECONNECT_DELAY_MS` uses the same configuration pattern and defaults to 1,000 ms.
 
 ## Browser tests
 

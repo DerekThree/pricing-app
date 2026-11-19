@@ -252,7 +252,8 @@ single Dashboard over WebSocket. The mock connection requires no authentication.
 The processor reads and forwards one pending batch at a time. Each batch receives one delivery
 attempt, or delivery is skipped if the Dashboard is disconnected. Afterward, the processor sets
 the Recommendation Outbox's `processed` field to `true`, even if sending failed. A crash after
-sending but before that update can cause the same batch to be sent again after restart.
+sending but before that update can cause the same `batchId` to be sent again after restart.
+The Dashboard may display or ignore that duplicate.
 
 Database operations use bounded retries. After retries are exhausted, the processor retains the
 pending operation in memory, checks database connectivity, and resumes that operation when the

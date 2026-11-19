@@ -628,7 +628,10 @@ resource "aws_ecs_task_definition" "dashboard" {
     mountPoints    = []
     volumesFrom    = []
     systemControls = []
-    environment    = []
+    environment = var.alb_enabled ? [{
+      name  = "TRANSACTION_PROCESSOR_WS_URL"
+      value = "ws://${aws_lb.pricing[0].dns_name}/api/v1/mock/txn/batches"
+    }] : []
     portMappings = [{
       containerPort = 5173
       hostPort      = 5173
@@ -808,6 +811,7 @@ resource "aws_ecs_task_definition" "mock_server" {
     }]
     environment = [
       { name = "SPRING_DATASOURCE_USERNAME", value = "accountdb_mock_server" },
+      { name = "RECOMMENDATION_STORE_USERNAME", value = "recommendationdb_txn_processor" },
       {
         name = "ENGINE_WAKE_UP_URL"
         value = format(
@@ -821,12 +825,27 @@ resource "aws_ecs_task_definition" "mock_server" {
           "jdbc:postgresql://%s:%s/accountdb",
           aws_db_instance.pricing.address, aws_db_instance.pricing.port
         )
+      },
+      {
+        name = "RECOMMENDATION_STORE_URL"
+        value = format(
+          "jdbc:postgresql://%s:%s/recommendationdb",
+          aws_db_instance.pricing.address, aws_db_instance.pricing.port
+        )
       }
     ]
-    secrets = [{
-      name      = "SPRING_DATASOURCE_PASSWORD"
-      valueFrom = format("%s:password::", aws_secretsmanager_secret.account_password.arn)
-    }]
+    secrets = [
+      {
+        name      = "SPRING_DATASOURCE_PASSWORD"
+        valueFrom = format("%s:password::", aws_secretsmanager_secret.account_password.arn)
+      },
+      {
+        name = "RECOMMENDATION_STORE_PASSWORD"
+        valueFrom = format(
+          "%s:password::", aws_secretsmanager_secret.recommendationdb_txn_processor_password.arn
+        )
+      }
+    ]
     healthCheck = {
       command     = ["CMD", "curl", "--fail", "--silent", "http://localhost:8081/actuator/health"]
       interval    = 30
@@ -886,6 +905,7 @@ resource "aws_ecs_service" "mock_server" {
   }
   depends_on = [
     aws_lb_listener_rule.mock_server,
+    aws_secretsmanager_secret_version.recommendationdb_txn_processor_password,
     aws_iam_role_policy.execution_secret,
     aws_iam_role_policy_attachment.execution_base
   ]
