@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted but unimplemented
+implemented
 
 ## Context
 

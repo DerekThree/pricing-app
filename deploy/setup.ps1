@@ -3,9 +3,11 @@
 $ErrorActionPreference = 'Stop'
 # The Terraform subnet availability zones are also fixed to us-east-1.
 $AwsRegion = 'us-east-1'
+$AwsAppUrl = 'https://www.flasearell.com'
 $Root = Split-Path -Parent $PSScriptRoot
 $Infra = Join-Path $PSScriptRoot 'aws'
 $Local = Join-Path $PSScriptRoot 'local'
+$GitHubOwner = 'DerekThree'
 $RepoNames = @('pricing-backend', 'pricing-dashboard', 'pricing-mock-server', 'pricing-engine')
 $ServiceNames = @($RepoNames | ForEach-Object { "$_-service" })
 $Cluster = 'pricing-app-cluster'
@@ -194,7 +196,7 @@ function Copy-Repositories {
         if (-not (Test-Path -LiteralPath $destination)) {
             Invoke-Native git @(
                 'clone', '--branch', 'main', '--single-branch',
-                "https://github.com/DerekThree/$name.git", $destination
+                "https://github.com/$GitHubOwner/$name.git", $destination
             )
             Write-Host "$name cloned."
         } elseif (-not (Test-Path -LiteralPath (Join-Path $destination '.git'))) {
@@ -309,113 +311,224 @@ function Invoke-Terraform {
     Invoke-Native terraform (@("-chdir=$Infra") + $Arguments)
 }
 
-function Set-RdsAvailable {
-    param([object]$Status)
-    if ($Status.Database -eq 'absent') { return }
-    $deadline = [DateTime]::UtcNow.AddMinutes(30)
-    $startRequested = $false
-    do {
-        # Read fresh status even if the earlier menu/operation check said available.
-        $response = Get-AwsJson @(
-            'rds', 'describe-db-instances', '--db-instance-identifier', $Database
-        )
-        $currentState = $response.DBInstances[0].DBInstanceStatus
-        if (-not $currentState) {
-            throw 'AWS returned no RDS status. Terraform apply will not continue.'
+function Get-MainCommits {
+    $commits = @{}
+    foreach ($name in $RepoNames) {
+        $commit = Invoke-Native gh @(
+            'api', "repos/$GitHubOwner/$name/git/ref/heads/main", '--jq', '.object.sha'
+        ) -Capture
+        if ($commit -notmatch '^[0-9a-f]{40}$') {
+            throw "GitHub did not return the main commit SHA for $name."
         }
-        if ($currentState -eq 'available') {
-            Write-Host 'RDS is available. Continuing with Terraform.'
-            return
-        }
-        if ($currentState -eq 'stopped' -and -not $startRequested) {
-            Write-Host 'Starting RDS...'
-            Invoke-Native aws @(
-                'rds', 'start-db-instance', '--db-instance-identifier', $Database,
-                '--region', $AwsRegion, '--query', 'DBInstance.DBInstanceStatus',
-                '--output', 'text', '--no-cli-pager'
-            )
-            $startRequested = $true
-        }
-        Write-Host "Waiting for RDS to become available (current status: $currentState)..."
-        Start-Sleep -Seconds 15
-    } while ([DateTime]::UtcNow -lt $deadline)
-    throw 'RDS did not become available within 30 minutes. Terraform apply will not continue.'
+        $commits[$name] = $commit
+    }
+    return $commits
 }
 
-function Push-Images {
-    $resources = @(Get-StateResources)
-    $images = @()
-    foreach ($name in @('backend', 'dashboard', 'mock_server', 'engine')) {
-        $repository = Get-StateValue $resources 'aws_ecr_repository' $name
-        if (-not $repository.repository_url) { throw "Missing ECR repository: $name." }
-        $images += [pscustomobject]@{ Name = $repository.name; Url = $repository.repository_url }
-    }
-
-    Build-LocalImages
-    $registry = $images[0].Url.Split('/')[0]
-    # Keep the password pipe inside cmd.exe: Windows PowerShell 5.1 can alter
-    # native-command stdin, while cmd.exe passes the AWS token through intact.
-    & cmd.exe /d /c "aws ecr get-login-password --region $AwsRegion | docker login --username AWS --password-stdin $registry" | Out-Host
-    if ($LASTEXITCODE -ne 0) { throw 'Docker ECR login failed.' }
-    foreach ($item in $images) {
-        if ($item.Url.Split('/')[0] -ne $registry) {
-            throw 'ECR images belong to different registries.'
+function Get-EcrImageDigest {
+    param([string]$Name, [string]$Commit)
+    $response = Get-AwsJson @(
+        'ecr', 'batch-get-image', '--repository-name', $Name,
+        '--image-ids', "imageTag=$Commit"
+    )
+    foreach ($failure in $response.failures) {
+        if ($failure.failureCode -ne 'ImageNotFound') {
+            throw "ECR failed to check $($name): $($failure.failureReason)"
         }
-        $image = "$($item.Url):latest"
-        Invoke-Native docker @('tag', "$($item.Name):latest", $image)
-        Invoke-Native docker @('push', $image)
     }
+    if ($response.images) { return $response.images[0].imageId.imageDigest }
+}
+
+function Find-CiImageRun {
+    param([string]$Name, [string]$Commit)
+    $repository = "$GitHubOwner/$Name"
+    $artifacts = Invoke-Native gh @(
+        'api', "repos/$repository/actions/artifacts", '--method', 'GET',
+        '-f', "name=$Name-image-$Commit", '--paginate', '--jq', '.artifacts[] | @json'
+    ) -Capture
+    foreach ($line in ($artifacts -split '\r?\n')) {
+        if (-not $line) { continue }
+        $artifact = $line | ConvertFrom-Json
+        if ($artifact.expired -or $artifact.workflow_run.head_branch -ne 'main') { continue }
+        $run = Invoke-Native gh @(
+            'api', "repos/$repository/actions/runs/$($artifact.workflow_run.id)"
+        ) -Capture | ConvertFrom-Json
+        if ($run.path -eq '.github/workflows/ci.yml' -and $run.conclusion -eq 'success' -and
+            $run.head_repository.full_name -eq $repository -and
+            ($run.event -eq 'workflow_dispatch' -or
+                ($run.event -eq 'push' -and $run.head_sha -eq $Commit))) {
+            return [string]$run.id
+        }
+    }
+}
+
+function Start-ImageWorkflow {
+    param([string]$Name, [string]$Workflow, [hashtable]$Inputs)
+    $parameters = @(
+        'api', "repos/$GitHubOwner/$Name/actions/workflows/$Workflow/dispatches",
+        '--method', 'POST', '-H', 'X-GitHub-Api-Version: 2026-03-10',
+        '-f', 'ref=main'
+    )
+    foreach ($key in $Inputs.Keys) {
+        $parameters += @('-f', "inputs[$key]=$($Inputs[$key])")
+    }
+    $run = Invoke-Native gh $parameters -Capture | ConvertFrom-Json
+    if (-not $run.workflow_run_id) { throw "GitHub did not return the run ID for $Name $Workflow." }
+    Write-Host "Started $Name $($Workflow): $($run.html_url)"
+    return [string]$run.workflow_run_id
+}
+
+function Wait-ImageWorkflow {
+    param([string]$Name, [string]$RunId)
+    $deadline = [DateTime]::UtcNow.AddHours(1)
+    do {
+        $run = Invoke-Native gh @(
+            'api', "repos/$GitHubOwner/$Name/actions/runs/$RunId"
+        ) -Capture | ConvertFrom-Json
+        if ($run.status -eq 'completed') {
+            if ($run.conclusion -eq 'success') { return }
+            throw "$Name $($run.name) finished with $($run.conclusion). See $($run.html_url)."
+        }
+        Start-Sleep -Seconds 15
+    } while ([DateTime]::UtcNow -lt $deadline)
+    throw "$Name $($run.name) is still running. See $($run.html_url)."
+}
+
+function Invoke-ServiceDeployment {
+    param([string]$Name, [string]$Commit)
+    $inputs = @{ operation = 'start'; commit_sha = $Commit }
+    if (-not (Get-EcrImageDigest $Name $Commit)) {
+        $ciRun = Find-CiImageRun $Name $Commit
+        if (-not $ciRun) {
+            $ciRun = Start-ImageWorkflow $Name 'ci.yml' @{ commit_sha = $Commit }
+            Wait-ImageWorkflow $Name $ciRun
+        }
+        $inputs.ci_run_id = $ciRun
+    }
+    $cdRun = Start-ImageWorkflow $Name 'cd.yml' $inputs
+    Wait-ImageWorkflow $Name $cdRun
+    return $cdRun
+}
+
+function Invoke-PeerDeployments {
+    param([hashtable]$Commits)
+    $jobs = @()
+    try {
+        foreach ($name in ($RepoNames | Where-Object { $_ -ne 'pricing-engine' })) {
+            $jobs += Start-Job -Name $name -ScriptBlock {
+                param($SetupScript, $Name, $Commit)
+                . $SetupScript
+                Invoke-ServiceDeployment $Name $Commit | Out-Null
+            } -ArgumentList $PSCommandPath, $name, $Commits[$name]
+        }
+        Receive-Job -Job $jobs -Wait -ErrorAction Continue
+        $failed = @($jobs | Where-Object State -ne 'Completed')
+        if ($failed.Count) { throw "Deployment failed for $($failed.Name -join ', ')." }
+    } finally {
+        $jobs | Remove-Job -Force
+    }
+}
+
+function Get-EngineDeploymentId {
+    param([string]$RunId)
+    $directory = Join-Path ([IO.Path]::GetTempPath()) ([guid]::NewGuid().ToString())
+    $file = Join-Path $directory 'engine-deployment-id.txt'
+    $download = @(
+        'run', 'download', $RunId, '--repo', "$GitHubOwner/pricing-engine",
+        '--name', 'engine-deployment-id', '--dir', $directory
+    )
+    try {
+        try {
+            Invoke-Native gh $download
+        } catch {
+            if (Test-Path -LiteralPath $file) { Remove-Item -LiteralPath $file }
+            Invoke-Native gh $download
+        }
+        $deploymentId = (Get-Content -LiteralPath $file -Raw).Trim()
+        if ($deploymentId -notmatch '^ecs-svc/[0-9]+$') {
+            throw "Engine CD run $RunId did not report a valid ECS deployment ID."
+        }
+        return $deploymentId
+    } finally {
+        if (Test-Path -LiteralPath $file) { Remove-Item -LiteralPath $file }
+        if (Test-Path -LiteralPath $directory) { [IO.Directory]::Delete($directory) }
+    }
+}
+
+function Get-EngineService {
+    $response = Get-AwsJson @(
+        'ecs', 'describe-services', '--cluster', $Cluster, '--services', 'pricing-engine-service'
+    )
+    return $response.services | Select-Object -First 1
+}
+
+function Wait-EngineDeployment {
+    param([string]$DeploymentId, [string]$Commit)
+    $digest = Get-EcrImageDigest 'pricing-engine' $Commit
+    if (-not $digest) { throw "The Engine image for commit $Commit is missing from ECR." }
+    $deadline = [DateTime]::UtcNow.AddMinutes(20)
+    $observed = $false
+    do {
+        $engine = Get-EngineService
+        $deployment = $engine.deployments | Where-Object { $_.id -eq $DeploymentId }
+        if ($deployment) { $observed = $true }
+        if ($deployment.rolloutState -eq 'FAILED' -or
+            ($observed -and $deployment.status -ne 'PRIMARY')) {
+            throw "Engine deployment $DeploymentId failed or was replaced."
+        }
+        if ($deployment.rolloutState -eq 'COMPLETED' -and $engine.desiredCount -gt 0 -and
+            $engine.runningCount -ge $engine.desiredCount -and $engine.pendingCount -eq 0 -and
+            @($engine.deployments).Count -eq 1) {
+            $tasks = Get-AwsJson @(
+                'ecs', 'list-tasks', '--cluster', $Cluster,
+                '--service-name', 'pricing-engine-service', '--desired-status', 'RUNNING',
+                '--max-items', '1'
+            )
+            if ($tasks.taskArns) {
+                $details = Get-AwsJson @(
+                    'ecs', 'describe-tasks', '--cluster', $Cluster, '--tasks', $tasks.taskArns[0]
+                )
+                $task = $details.tasks | Select-Object -First 1
+                if ($task.startedBy -eq $DeploymentId -and $task.healthStatus -eq 'HEALTHY') {
+                    $actual = ($task.containers | Where-Object { $_.name -eq 'Main' }).imageDigest
+                    if ($actual -ne $digest) {
+                        throw "Engine deployment $DeploymentId is running an unexpected image."
+                    }
+                    return
+                }
+            }
+        }
+        Write-Host "Waiting for Engine deployment $DeploymentId..."
+        Start-Sleep -Seconds 15
+    } while ([DateTime]::UtcNow -lt $deadline)
+    throw "Engine deployment $DeploymentId did not become healthy within 20 minutes."
+}
+
+function Wait-EngineStopped {
+    $deadline = [DateTime]::UtcNow.AddMinutes(20)
+    do {
+        $engine = Get-EngineService
+        if (-not ($engine.desiredCount -or $engine.runningCount -or $engine.pendingCount)) {
+            return
+        }
+        Write-Host 'Waiting for Engine to stop...'
+        Start-Sleep -Seconds 15
+    } while ([DateTime]::UtcNow -lt $deadline)
+    throw 'Engine did not stop within 20 minutes.'
 }
 
 function Wait-Services {
-    param([switch]$Stopped, [switch]$EngineOnly)
     $deadline = [DateTime]::UtcNow.AddMinutes(20)
     do {
         $status = Get-AwsStatus
-        if ($Stopped) {
-            $busy = @($status.Services | Where-Object {
-                (-not $EngineOnly -or $_.serviceName -eq 'pricing-engine-service') -and
-                ($_.desiredCount -ne 0 -or $_.runningCount -ne 0 -or $_.pendingCount -ne 0)
-            })
-            if (-not $busy.Count) { return }
-        } elseif ($EngineOnly) {
-            $engine = $status.Services | Where-Object {
-                $_.serviceName -eq 'pricing-engine-service'
-            }
-            $resources = @(Get-StateResources)
-            $expected = Get-StateValue $resources 'aws_ecs_service' 'engine'
-            if ($engine.taskDefinition -ne $expected.task_definition -or
-                @($engine.deployments | Where-Object { $_.rolloutState -eq 'FAILED' }).Count) {
-                throw 'Engine initialization failed or rolled back to an unexpected task definition.'
-            }
-            if ($engine.desiredCount -ge 1 -and
-                $engine.runningCount -eq $engine.desiredCount -and $engine.pendingCount -eq 0 -and
-                @($engine.deployments).Count -eq 1 -and
-                $engine.deployments[0].rolloutState -eq 'COMPLETED') {
-                $running = Get-AwsJson @(
-                    'ecs', 'list-tasks', '--cluster', $Cluster,
-                    '--service-name', $engine.serviceName
-                )
-                if (@($running.taskArns).Count -eq $engine.desiredCount) {
-                    $tasks = Get-AwsJson (@(
-                        'ecs', 'describe-tasks', '--cluster', $Cluster, '--tasks'
-                    ) + @($running.taskArns))
-                    $healthy = @($tasks.tasks | Where-Object {
-                        $_.taskDefinitionArn -eq $expected.task_definition -and
-                        $_.lastStatus -eq 'RUNNING' -and $_.healthStatus -eq 'HEALTHY'
-                    })
-                    if (-not @($tasks.failures).Count -and
-                        $healthy.Count -eq $engine.desiredCount) { return }
-                }
-            }
-        } elseif ($status.Running) {
+        if ($status.Running) {
             $resources = @(Get-StateResources)
             foreach ($name in @('backend', 'dashboard', 'mock_server', 'engine')) {
-                $expected = Get-StateValue $resources 'aws_ecs_service' $name
+                $expected = Get-StateValue $resources 'aws_ecs_task_definition' $name
                 $actual = $status.Services | Where-Object {
-                    $_.serviceName -eq $expected.name
+                    $_.serviceName -eq "pricing-$($name.Replace('_', '-'))-service"
                 }
-                if ($actual.taskDefinition -ne $expected.task_definition) {
+                if ($actual.taskDefinition -ne $expected.arn) {
                     throw "The $name deployment rolled back or uses an unexpected task definition."
                 }
             }
@@ -451,104 +564,80 @@ function Invoke-AwsOperation {
         Write-Host 'No Terraform-managed infrastructure exists.'
         return
     }
-    $savedEnvironment = @{}
-    foreach ($key in @('TF_VAR_aws_region')) {
-        $savedEnvironment[$key] = [Environment]::GetEnvironmentVariable($key, 'Process')
-    }
-    try {
-        $env:TF_VAR_aws_region = $AwsRegion
-        switch ($Operation) {
-            'Start' {
-                $serviceCounts = @{}
-                foreach ($name in @('backend', 'dashboard', 'mock_server', 'engine')) {
-                    $service = $status.Services | Where-Object {
-                        $_.serviceName -eq "pricing-$($name.Replace('_', '-'))-service"
-                    }
-                    $serviceCounts[$name] = [int]$service.desiredCount
+    $regionVar = "-var=aws_region=$AwsRegion"
+    switch ($Operation) {
+        'Start' {
+            $commits = Get-MainCommits
+            $serviceCounts = @{}
+            foreach ($name in @('backend', 'dashboard', 'mock_server', 'engine')) {
+                $service = $status.Services | Where-Object {
+                    $_.serviceName -eq "pricing-$($name.Replace('_', '-'))-service"
                 }
-                $stopEngineOnFailure = $serviceCounts.engine -eq 0
-                if ($status.Database -ne 'absent') {
-                    Set-RdsAvailable $status
+                $serviceCounts[$name] = [int]$service.desiredCount
+            }
+            Write-Host 'Provision infrastructure and credentials, preserving service counts.'
+            Invoke-Terraform (@(
+                'apply', '-var-file=started.tfvars', '-var=import_existing=false', $regionVar
+            ) + @($serviceCounts.Keys | ForEach-Object {
+                "-var=$($_)_desired_count=$($serviceCounts[$_])"
+            }))
+            $engineDeploymentId = $null
+            $previousDeploymentId = $null
+            if ($serviceCounts.engine -eq 0) {
+                $previous = (Get-EngineService).deployments | Where-Object {
+                    $_.status -eq 'PRIMARY'
                 }
-                Write-Host 'Prepare RDS and its managed master secret before credential consumers.'
-                Invoke-Terraform @(
-                    'apply', '-var=rds_state=available', '-var=import_existing=false',
-                    '-target=aws_db_instance.pricing'
-                )
-                Write-Host 'Provision infrastructure and credentials, preserving service counts.'
-                Invoke-Terraform (@(
-                    'apply', '-var=rds_state=available', '-var=alb_enabled=true',
-                    '-var=import_existing=false'
-                ) + @($serviceCounts.Keys | ForEach-Object {
-                    "-var=$($_)_desired_count=$($serviceCounts[$_])"
-                }))
-                Push-Images
-                $serviceCounts.engine = [Math]::Max(1, $serviceCounts.engine)
-                try {
-                    Write-Host 'Start Engine and wait for database initialization readiness.'
-                    Invoke-Terraform (@(
-                        'apply', '-var=rds_state=available',
-                        '-var=alb_enabled=true', '-var=import_existing=false'
-                    ) + @($serviceCounts.Keys | ForEach-Object {
-                        "-var=$($_)_desired_count=$($serviceCounts[$_])"
-                    }))
-                    Wait-Services -EngineOnly
-                } catch {
-                    $failure = $_
-                    if ($stopEngineOnFailure) {
-                        try {
+                $previousDeploymentId = $previous.id
+            }
+            try {
+                $engineRun = Invoke-ServiceDeployment 'pricing-engine' $commits['pricing-engine']
+                $engineDeploymentId = Get-EngineDeploymentId $engineRun
+                Wait-EngineDeployment $engineDeploymentId $commits['pricing-engine']
+            } catch {
+                # Cleanup requires the ID from the CD run that changed Engine.
+                if ($serviceCounts.engine -eq 0 -and $engineDeploymentId) {
+                    try {
+                        $engine = Get-EngineService
+                        $primary = $engine.deployments | Where-Object {
+                            $_.status -eq 'PRIMARY'
+                        }
+                        $rolledBack = $previousDeploymentId -and
+                            $primary.id -eq $previousDeploymentId
+                        if ($engine.desiredCount -gt 0 -and
+                            ($primary.id -eq $engineDeploymentId -or $rolledBack)) {
+                            Write-Warning 'Engine startup failed. Check the CloudWatch log.'
                             Get-AwsJson @(
                                 'ecs', 'update-service', '--cluster', $Cluster,
-                                '--service', 'pricing-engine-service', '--desired-count', '0'
+                                '--service', $engine.serviceName, '--desired-count', '0'
                             ) | Out-Null
-                            Wait-Services -Stopped -EngineOnly
-                        } catch {
-                            Write-Warning "Could not confirm Engine stopped: $($_.Exception.Message)"
+                            Wait-EngineStopped
                         }
+                    } catch {
+                        Write-Warning "Could not confirm Engine stopped: $($_.Exception.Message)"
                     }
-                    throw "Engine initialization failed. Resources retained; correct and rerun. " +
-                        "Check the engine CloudWatch log. $($failure.Exception.Message)"
                 }
-                Write-Host 'Engine initialization succeeded. Start the other services.'
-                Invoke-Terraform (@(
-                    'apply', '-var-file=started.tfvars', '-var=import_existing=false'
-                ) + @($serviceCounts.Keys | ForEach-Object {
-                    "-var=$($_)_desired_count=$([Math]::Max(1, $serviceCounts[$_]))"
-                }))
-                Wait-Services
-                Invoke-Terraform @('output', '-raw', 'alb_dns_name')
-                Write-Host ''
+                throw
             }
-            'Stop' {
-                Set-RdsAvailable $status
-                Write-Host 'Stop ECS and remove the ALB.'
-                Invoke-Terraform @(
-                    'apply', '-var=rds_state=available',
-                    '-var=import_existing=false'
-                )
-                Wait-Services -Stopped
-                Write-Host 'Stop RDS after ECS has drained.'
-                Invoke-Terraform @(
-                    'apply', '-var=import_existing=false'
-                )
-            }
-            'Destroy' {
-                Write-Host 'Destroy removes all managed infrastructure, database data, and ECR images.'
-                Invoke-Terraform @(
-                    'destroy', '-var-file=started.tfvars', '-var=import_existing=false'
-                )
-            }
+            Invoke-PeerDeployments $commits
+            Wait-Services
+            Write-Host "Dashboard: $AwsAppUrl"
         }
-    } finally {
-        foreach ($key in $savedEnvironment.Keys) {
-            [Environment]::SetEnvironmentVariable($key, $savedEnvironment[$key], 'Process')
+        'Stop' {
+            Write-Host 'Stop ECS and RDS and remove the ALB.'
+            Invoke-Terraform @('apply', '-var=import_existing=false', $regionVar)
+        }
+        'Destroy' {
+            Write-Host 'Destroy removes all managed infrastructure, database data, and ECR images.'
+            Invoke-Terraform @(
+                'destroy', '-var-file=started.tfvars', '-var=import_existing=false', $regionVar
+            )
         }
     }
 }
 
 function Show-Menu {
     $available = @{}
-    foreach ($cli in @('git', 'docker', 'aws', 'terraform')) {
+    foreach ($cli in @('git', 'docker', 'aws', 'terraform', 'gh')) {
         $available[$cli] = [bool](Get-Command $cli -ErrorAction SilentlyContinue)
     }
     $needsClone = @($RepoNames | Where-Object {
@@ -559,7 +648,7 @@ function Show-Menu {
     $requirements = @{
         1 = @('git')
         2 = $buildTools
-        3 = $buildTools + @('aws', 'terraform')
+        3 = @('aws', 'terraform', 'gh')
         4 = @('aws', 'terraform')
         5 = @('aws', 'terraform')
     }
@@ -610,9 +699,8 @@ function Show-Menu {
     }
     if ($status) {
         if ($status.Running) {
-            $address = "http://$($status.LoadBalancers[0].DNSName)"
             $reasons[3] = (@(
-                $reasons[3], "Already running at $address"
+                $reasons[3], "Already running at $AwsAppUrl"
             ) | Where-Object { $_ }) -join '; '
         }
         if (-not $status.NeedsStop) {

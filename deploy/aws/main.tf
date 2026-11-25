@@ -28,7 +28,7 @@ variable "import_existing" {
   default     = false
 }
 variable "allowed_http_cidr" {
-  description = "Existing ALB HTTP allowlist; do not widen without explicit authorization."
+  description = "ALB HTTPS allowlist; do not widen without explicit authorization."
   type        = string
   default     = "130.105.47.225/32"
 }
@@ -86,6 +86,8 @@ variable "rds_state" {
 }
 locals {
   database_identifier = "pricing-app-db"
+  public_domain       = "flasearell.com"
+  dashboard_hostname  = "www.${local.public_domain}"
   public_subnets = {
     a = { cidr = "10.0.3.0/24", az = "us-east-1a" }
     b = { cidr = "10.0.4.0/24", az = "us-east-1b" }
@@ -143,8 +145,8 @@ resource "aws_security_group" "alb" {
   description = "Pricing App load balancer security group"
   vpc_id      = aws_vpc.pricing.id
   ingress {
-    from_port   = 80
-    to_port     = 80
+    from_port   = 443
+    to_port     = 443
     protocol    = "tcp"
     cidr_blocks = [var.allowed_http_cidr]
   }
@@ -309,9 +311,7 @@ resource "aws_db_instance" "pricing" {
   skip_final_snapshot          = true
 }
 resource "aws_rds_instance_state" "pricing" {
-  # Independent so a targeted start cannot modify a stopped database first.
-  # deploy/setup.ps1 creates the database before applying this controller.
-  identifier = local.database_identifier
+  identifier = aws_db_instance.pricing.identifier
   state      = var.rds_state
 }
 resource "aws_ecr_repository" "backend" {
@@ -497,6 +497,44 @@ resource "aws_lb" "pricing" {
   security_groups    = [aws_security_group.alb.id]
   subnets            = [aws_subnet.public["a"].id, aws_subnet.public["b"].id]
 }
+data "aws_route53_zone" "demo" {
+  name         = local.public_domain
+  private_zone = false
+}
+resource "aws_acm_certificate" "dashboard" {
+  domain_name       = local.dashboard_hostname
+  validation_method = "DNS"
+
+  lifecycle {
+    create_before_destroy = true
+  }
+}
+locals {
+  dashboard_validation = one(aws_acm_certificate.dashboard.domain_validation_options)
+}
+resource "aws_route53_record" "dashboard_validation" {
+  zone_id = data.aws_route53_zone.demo.zone_id
+  name    = local.dashboard_validation.resource_record_name
+  type    = local.dashboard_validation.resource_record_type
+  records = [local.dashboard_validation.resource_record_value]
+  ttl     = 300
+}
+resource "aws_acm_certificate_validation" "dashboard" {
+  certificate_arn         = aws_acm_certificate.dashboard.arn
+  validation_record_fqdns = [aws_route53_record.dashboard_validation.fqdn]
+}
+resource "aws_route53_record" "www" {
+  count   = var.alb_enabled ? 1 : 0
+  zone_id = data.aws_route53_zone.demo.zone_id
+  name    = local.dashboard_hostname
+  type    = "A"
+
+  alias {
+    name                   = aws_lb.pricing[0].dns_name
+    zone_id                = aws_lb.pricing[0].zone_id
+    evaluate_target_health = false
+  }
+}
 resource "aws_lb_target_group" "backend" {
   name        = "pricing-backend-tg"
   port        = 8080
@@ -533,11 +571,17 @@ resource "aws_lb_target_group" "dashboard" {
     timeout             = 5
   }
 }
-resource "aws_lb_listener" "http" {
+moved {
+  from = aws_lb_listener.http
+  to   = aws_lb_listener.https
+}
+resource "aws_lb_listener" "https" {
   count             = var.alb_enabled ? 1 : 0
   load_balancer_arn = aws_lb.pricing[0].arn
-  port              = 80
-  protocol          = "HTTP"
+  port              = 443
+  protocol          = "HTTPS"
+  ssl_policy        = "ELBSecurityPolicy-TLS13-1-2-2021-06"
+  certificate_arn   = aws_acm_certificate_validation.dashboard.certificate_arn
   default_action {
     type             = "forward"
     target_group_arn = aws_lb_target_group.dashboard.arn
@@ -551,7 +595,7 @@ resource "aws_lb_listener" "http" {
 }
 resource "aws_lb_listener_rule" "api" {
   count        = var.alb_enabled ? 1 : 0
-  listener_arn = aws_lb_listener.http[0].arn
+  listener_arn = aws_lb_listener.https[0].arn
   priority     = 2
   action {
     type             = "forward"
@@ -630,7 +674,7 @@ resource "aws_ecs_task_definition" "dashboard" {
     systemControls = []
     environment = var.alb_enabled ? [{
       name  = "TRANSACTION_PROCESSOR_WS_URL"
-      value = "ws://${aws_lb.pricing[0].dns_name}/api/v1/mock/txn/batches"
+      value = "wss://${local.dashboard_hostname}/api/v1/mock/txn/batches"
     }] : []
     portMappings = [{
       containerPort = 5173
@@ -724,7 +768,10 @@ resource "aws_ecs_service" "dashboard" {
       container_port   = 5173
     }
   }
-  depends_on = [aws_lb_listener.http, aws_iam_role_policy_attachment.execution_base]
+  depends_on = [
+    aws_lb_listener.https,
+    aws_iam_role_policy_attachment.execution_base
+  ]
 }
 output "alb_dns_name" {
   value = var.alb_enabled ? aws_lb.pricing[0].dns_name : null
@@ -781,7 +828,7 @@ resource "aws_lb_target_group" "mock_server" {
 }
 resource "aws_lb_listener_rule" "mock_server" {
   count        = var.alb_enabled ? 1 : 0
-  listener_arn = aws_lb_listener.http[0].arn
+  listener_arn = aws_lb_listener.https[0].arn
   priority     = 1
   action {
     type             = "forward"

@@ -124,7 +124,8 @@ Shell scripts use LF line endings through `.gitattributes`.
 
 ### AWS
 
-Requires **AWS CLI**, **Terraform**, and **Docker Desktop**.
+Requires **AWS CLI**, **Terraform**, and an authenticated **GitHub CLI** with access to run
+workflows in all four repositories. Use `gh auth login` to sign in.
 
 ```powershell
 .\deploy\setup.ps1
@@ -132,27 +133,38 @@ Requires **AWS CLI**, **Terraform**, and **Docker Desktop**.
 
 Terraform configuration lives in `deploy/aws/`; S3 state configuration lives in
 `deploy/aws/bootstrap/`. Start returns without changes when the application is already running.
-Otherwise, it prepares RDS, infrastructure and credentials, then builds and pushes all four
-application images while preserving existing service counts. It starts Engine and checks
-the expected task revision is healthy through `/openapi.yaml` before starting other stopped
-application services. If initialization fails, resources and previously running services are
-retained; an Engine newly started by this invocation is stopped. Correct the failure and run
-Start again; the script does not correct configuration or roll back schemas. Engine logs use
-the `engine` stream prefix in `/ecs/pricing-app`.
+Start records the current commit on `main` in each repository and uses one Terraform apply with
+the state bucket in place.
+
+1. Terraform prepares RDS, the ALB and its DNS alias, ECR, and AWS credentials. It preserves
+   each ECS service's desired count.
+2. PowerShell dispatches Engine CD, then waits for that deployment to pass Engine's
+   `/openapi.yaml` health check. It then dispatches CD for the other three services in parallel.
+3. Each CD pipeline reuses the commit's ECR image when available. Otherwise, PowerShell passes
+   the matching CI artifact, dispatching CI if it needs to build one. For explicit Start, CD
+   raises a stopped service's desired count to one and preserves any positive count.
+
+A push to `main` publishes the image and redeploys a running service. A stopped service stays
+at zero until explicit Start.
+
+If Engine initialization fails, Start keeps resources and previously running services. It
+scales a newly started Engine back to zero when it can identify the failed deployment or its
+rollback. Correct the failure and run Start again. Engine logs use the `engine` stream prefix
+in `/ecs/pricing-app`.
 
 RDS manages the `pricinguser` master password in Secrets Manager. Terraform generates other
 database passwords with ephemeral values and stores them through write-only secret arguments.
 Later start/stop operations retain secret versions without resupplying or rotating passwords.
-Setup applies RDS first so its managed master-secret ARN exists before planning consumers.
 RDS creates `pricingdb`. Engine reuses the Pricing Store URL with one privileged
 initialization login and receives separate restricted runtime passwords through ECS Secrets
 Manager injection. It creates `accountdb`, `recommendationdb`, and login roles, runs all three
 stores' Flyway migrations, and assigns grants before readiness. Pending processing and unavailable
 downstream services do not block initialization readiness.
 
-Open the web address printed by the script. Stop drains all four application services before
-stopping the single RDS instance. Destroy removes the managed application infrastructure and data;
-the state bucket remains separately managed.
+Open the web address printed by the script. Stop uses one Terraform apply to scale ECS to zero,
+remove the ALB and its DNS alias, and stop RDS. ECS scale-down and RDS shutdown can run in parallel.
+Destroy removes the managed application infrastructure and data. The state bucket is managed
+separately.
 
 ## Configuring Fees
 

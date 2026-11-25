@@ -21,7 +21,25 @@ Backend and Mock Server runtime logins do not own schemas or run migrations.
 
 Existing database data and credentials need no preservation. Choose the simplest treatment; neither retaining nor deleting them is a requirement.
 
-The Engine initializes on every startup before becoming ready, reusing the Pricing Store URL with privileged initialization credentials. RDS or local PostgreSQL creates `pricingdb`; the Engine creates the other two databases. Start leaves an already-running application unchanged and preserves running service counts during partial startup, waiting for Engine readiness before starting other stopped services. If initialization fails, startup stops and retains resources and previously running services; an Engine newly started by this invocation is stopped. A developer corrects the cause before running Start again; the script does not correct configuration or roll back schemas. Local containers use the same Engine-owned initialization and migration path as AWS.
+The Engine initializes on every startup before becoming ready, reusing the Pricing Store URL
+with privileged initialization credentials. RDS or local PostgreSQL creates `pricingdb`. Engine
+creates the other two databases. Local containers use the same Engine-owned initialization and
+migration path as AWS.
+
+AWS Start leaves an already-running application unchanged. With the state bucket in place,
+one Terraform apply provisions infrastructure and credentials, creates or resumes RDS, and
+preserves each ECS service's desired count. PowerShell dispatches CD for the recorded Engine
+`main` commit and waits for the resulting ECS deployment to become healthy before dispatching
+CD for the other three repositories. CD reuses images from ECR or publishes CI-built images.
+Explicit Start authorizes CD to raise a stopped service's desired count to one. A push to
+`main` publishes the image and redeploys the service only when its desired count is positive.
+
+If initialization fails, startup retains resources and previously running services. Start stops
+an Engine it newly started when it can identify the failed deployment or its rollback. If the
+deployment ID is unavailable, Start reports the failure before dispatching the other services.
+
+AWS Stop uses one full Terraform apply to scale ECS services to zero, remove the ALB and DNS
+alias, and stop RDS. ECS scale-down and RDS shutdown can run in parallel.
 
 Include Flyway-managed immutability triggers in this work. Allow inserts but reject UPDATE, DELETE, and TRUNCATE on `accounts`, `account_attributes`, `fee_requests`, `account_recommendations`, `fee_request_recommendations`, and `recommendation_eligibility_reasons`. Both `batch_outbox` and `recommendation_outbox` reject DELETE, TRUNCATE, and changes to `batch_id`, without role-based exceptions. Other columns retain the handoff's table-wide UPDATE grants, including future columns.
 
@@ -29,5 +47,7 @@ Engine readiness means database initialization succeeded; pending work and downs
 
 No manual CloudShell operations or separate database-init ECS task are required. Verification must cover fresh deployment, startup with existing databases, the already-running no-op, initialization failure and corrected rerun, runtime grants, and the agreed immutability rules in local containers and AWS.
 
-Implemented; verification is recorded in the tickets. Fresh empty-AWS provisioning is deferred
-by the user and remains unverified.
+## Verification
+
+The original initialization verification is recorded in the tickets. The revised Start and
+Stop flow, including fresh AWS provisioning and GitHub Actions dispatch, awaits user testing.
