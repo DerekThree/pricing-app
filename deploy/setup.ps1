@@ -380,11 +380,22 @@ function Start-ImageWorkflow {
 
 function Wait-ImageWorkflow {
     param([string]$Name, [string]$RunId)
-    $deadline = [DateTime]::UtcNow.AddHours(1)
+    $started = [DateTime]::UtcNow
+    $deadline = $started.AddHours(1)
+    $visibilityDeadline = $started.AddMinutes(1)
+    $run = $null
     do {
-        $run = Invoke-Native gh @(
-            'api', "repos/$GitHubOwner/$Name/actions/runs/$RunId"
-        ) -Capture | ConvertFrom-Json
+        try {
+            $run = Invoke-Native gh @(
+                'api', "repos/$GitHubOwner/$Name/actions/runs/$RunId"
+            ) -Capture | ConvertFrom-Json
+        } catch {
+            # A newly dispatched run may take a moment to appear in the API.
+            if ($run -or [DateTime]::UtcNow -ge $visibilityDeadline -or
+                $_.Exception.Message -notmatch '\(HTTP 404\)') {
+                throw
+            }
+        }
         if ($run.status -eq 'completed') {
             if ($run.conclusion -eq 'success') { return }
             throw "$Name $($run.name) finished with $($run.conclusion). See $($run.html_url)."
