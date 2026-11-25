@@ -311,6 +311,38 @@ function Invoke-Terraform {
     Invoke-Native terraform (@("-chdir=$Infra") + $Arguments)
 }
 
+function Set-RdsAvailable {
+    param([object]$Status)
+    if ($Status.Database -eq 'absent') { return }
+    $deadline = [DateTime]::UtcNow.AddMinutes(30)
+    $startRequested = $false
+    do {
+        $response = Get-AwsJson @(
+            'rds', 'describe-db-instances', '--db-instance-identifier', $Database
+        )
+        $currentState = $response.DBInstances[0].DBInstanceStatus
+        if (-not $currentState) {
+            throw 'AWS returned no RDS status. Terraform apply will not continue.'
+        }
+        if ($currentState -eq 'available') {
+            Write-Host 'RDS is available. Continuing with Terraform.'
+            return
+        }
+        if ($currentState -eq 'stopped' -and -not $startRequested) {
+            Write-Host 'Starting RDS...'
+            Invoke-Native aws @(
+                'rds', 'start-db-instance', '--db-instance-identifier', $Database,
+                '--region', $AwsRegion, '--query', 'DBInstance.DBInstanceStatus',
+                '--output', 'text', '--no-cli-pager'
+            )
+            $startRequested = $true
+        }
+        Write-Host "Waiting for RDS to become available (current status: $currentState)..."
+        Start-Sleep -Seconds 15
+    } while ([DateTime]::UtcNow -lt $deadline)
+    throw 'RDS did not become available within 30 minutes. Terraform apply will not continue.'
+}
+
 function Get-MainCommits {
     $commits = @{}
     foreach ($name in $RepoNames) {
@@ -579,6 +611,7 @@ function Invoke-AwsOperation {
     switch ($Operation) {
         'Start' {
             $commits = Get-MainCommits
+            Set-RdsAvailable $status
             $serviceCounts = @{}
             foreach ($name in @('backend', 'dashboard', 'mock_server', 'engine')) {
                 $service = $status.Services | Where-Object {
