@@ -311,38 +311,6 @@ function Invoke-Terraform {
     Invoke-Native terraform (@("-chdir=$Infra") + $Arguments)
 }
 
-function Set-RdsAvailable {
-    param([object]$Status)
-    if ($Status.Database -eq 'absent') { return }
-    $deadline = [DateTime]::UtcNow.AddMinutes(30)
-    $startRequested = $false
-    do {
-        $response = Get-AwsJson @(
-            'rds', 'describe-db-instances', '--db-instance-identifier', $Database
-        )
-        $currentState = $response.DBInstances[0].DBInstanceStatus
-        if (-not $currentState) {
-            throw 'AWS returned no RDS status. Terraform apply will not continue.'
-        }
-        if ($currentState -eq 'available') {
-            Write-Host 'RDS is available. Continuing with Terraform.'
-            return
-        }
-        if ($currentState -eq 'stopped' -and -not $startRequested) {
-            Write-Host 'Starting RDS...'
-            Invoke-Native aws @(
-                'rds', 'start-db-instance', '--db-instance-identifier', $Database,
-                '--region', $AwsRegion, '--query', 'DBInstance.DBInstanceStatus',
-                '--output', 'text', '--no-cli-pager'
-            )
-            $startRequested = $true
-        }
-        Write-Host "Waiting for RDS to become available (current status: $currentState)..."
-        Start-Sleep -Seconds 15
-    } while ([DateTime]::UtcNow -lt $deadline)
-    throw 'RDS did not become available within 30 minutes. Terraform apply will not continue.'
-}
-
 function Get-MainCommits {
     $commits = @{}
     foreach ($name in $RepoNames) {
@@ -611,7 +579,6 @@ function Invoke-AwsOperation {
     switch ($Operation) {
         'Start' {
             $commits = Get-MainCommits
-            Set-RdsAvailable $status
             $serviceCounts = @{}
             foreach ($name in @('backend', 'dashboard', 'mock_server', 'engine')) {
                 $service = $status.Services | Where-Object {
@@ -620,11 +587,16 @@ function Invoke-AwsOperation {
                 $serviceCounts[$name] = [int]$service.desiredCount
             }
             Write-Host 'Provision infrastructure and credentials, preserving service counts.'
-            Invoke-Terraform (@(
+            $applyArgs = @(
                 'apply', '-var-file=started.tfvars', '-var=import_existing=false', $regionVar
             ) + @($serviceCounts.Keys | ForEach-Object {
                 "-var=$($_)_desired_count=$($serviceCounts[$_])"
-            }))
+            })
+            if ($status.Database -notin @('available', 'absent') -and
+                (Get-StateValue $resources 'terraform_data' 'resume_rds')) {
+                $applyArgs += '-replace=terraform_data.resume_rds[0]'
+            }
+            Invoke-Terraform $applyArgs
             $engineDeploymentId = $null
             $previousDeploymentId = $null
             if ($serviceCounts.engine -eq 0) {
@@ -668,7 +640,9 @@ function Invoke-AwsOperation {
         }
         'Stop' {
             Write-Host 'Stop ECS and RDS and remove the ALB.'
-            Invoke-Terraform @('apply', '-var=import_existing=false', $regionVar)
+            $applyArgs = @('apply', '-var=import_existing=false', $regionVar)
+            if ($status.Database -eq 'stopped') { $applyArgs += '-var=rds_already_stopped=true' }
+            Invoke-Terraform $applyArgs
         }
         'Destroy' {
             Write-Host 'Destroy removes all managed infrastructure, database data, and ECR images.'

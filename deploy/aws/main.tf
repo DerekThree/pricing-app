@@ -84,6 +84,11 @@ variable "rds_state" {
     error_message = "rds_state must be available or stopped."
   }
 }
+variable "rds_already_stopped" {
+  description = "Skip the Stop action when the database is already stopped."
+  type        = bool
+  default     = false
+}
 locals {
   database_identifier = "pricing-app-db"
   public_domain       = "flasearell.com"
@@ -310,9 +315,52 @@ resource "aws_db_instance" "pricing" {
   deletion_protection          = false
   skip_final_snapshot          = true
 }
+moved {
+  from = aws_rds_instance_state.pricing
+  to   = aws_rds_instance_state.pricing[0]
+}
+
 resource "aws_rds_instance_state" "pricing" {
+  count      = var.rds_state == "stopped" && !var.rds_already_stopped ? 1 : 0
   identifier = aws_db_instance.pricing.identifier
-  state      = var.rds_state
+  state      = "stopped"
+}
+
+resource "terraform_data" "resume_rds" {
+  count            = var.rds_state == "available" ? 1 : 0
+  triggers_replace = aws_db_instance.pricing.resource_id
+  input = {
+    db_instance_identifier = aws_db_instance.pricing.identifier
+    desired_state          = var.rds_state
+  }
+
+  provisioner "local-exec" {
+    interpreter = ["powershell", "-NoProfile", "-NonInteractive", "-Command"]
+    environment = {
+      PRICING_RDS_INSTANCE_ID = self.input.db_instance_identifier
+      PRICING_RDS_REGION      = var.aws_region
+    }
+    command = <<-POWERSHELL
+      $ErrorActionPreference = 'Stop'
+      $instance = @('--db-instance-identifier', $env:PRICING_RDS_INSTANCE_ID,
+                    '--region', $env:PRICING_RDS_REGION, '--no-cli-pager')
+      $status = aws rds describe-db-instances @instance --query 'DBInstances[0].DBInstanceStatus' --output text
+      if ($LASTEXITCODE) { exit $LASTEXITCODE }
+      if ($status -eq 'available') { exit 0 }
+
+      if ($status -eq 'stopping') {
+          aws rds wait db-instance-stopped @instance
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          $status = 'stopped'
+      }
+      if ($status -eq 'stopped') {
+          aws rds start-db-instance @instance --query 'DBInstance.DBInstanceStatus' --output text
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+      }
+      aws rds wait db-instance-available @instance
+      exit $LASTEXITCODE
+    POWERSHELL
+  }
 }
 resource "aws_ecr_repository" "backend" {
   name                 = "pricing-backend"
